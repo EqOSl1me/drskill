@@ -80,8 +80,9 @@ def discover(
     # Store-delivered skills first, because their rank against the native
     # paths is harness-specific: most keep plugin roots BELOW every native
     # path (proven on gemini and copilot; codex keeps its no-shadowing
-    # semantics via search_order "none"), while pi resolves packages
-    # BEFORE native dirs with first-wins collision handling.
+    # semantics via search_order "none"). pi resolves packages first in
+    # time but resourcePrecedenceRank sorts them below every native dir, so
+    # it also takes the after-native default (hdm2).
     plugins, unreadable_states = discover_plugins(h.id, home, project_root)
     unreadable = [(h.id, p) for p in unreadable_states]
     usable = [

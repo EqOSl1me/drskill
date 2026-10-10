@@ -46,11 +46,13 @@ mcp_verified = true
 # keep the first discovered skill", which is consistent once the scan order
 # is read from source.) Bare .md files count as skills only in the two
 # pi-native directories.
-# Store packages: pi's package-manager resolve() processes packages
-# BEFORE every native dir and loadSkills keeps the first same-name skill
-# (skills.js:326-346), so package skill roots rank ABOVE native paths
-# -- the inverse of gemini/copilot (dist/core/package-manager.js:707-736,
-# verified against 1.1.0).
+# Store packages: pi resolves packages first in time, but toResolvedPaths()
+# sorts every resource by resourcePrecedenceRank (project auto=1,
+# user auto=3, package=4), so packages rank BELOW all native dirs and a
+# native skill wins a same-name collision (loadSkills is first-wins,
+# skills.js:326-346). Same after-native order as gemini/copilot
+# (dist/core/package-manager.js:707-736, 1986-2066, 2124; verified 1.1.0).
+# plugin_order is left at its after-native default.
 [[harness]]
 id = "pi"
 display_name = "Pi"
@@ -60,7 +62,6 @@ detect = [".pi", "~/.pi"]
 project_paths = [".pi/skills", ".agents/skills"]
 global_paths = ["~/.pi/agent/skills", "~/.agents/skills"]
 search_order = "project-first"
-plugin_order = "before-native"
 recursive = true
 root_md_paths = [".pi/skills", "~/.pi/agent/skills"]
 

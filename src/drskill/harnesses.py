@@ -22,9 +22,10 @@ class HarnessDef(BaseModel):
     # resolution skips shadow marking entirely.
     search_order: Literal["project-first", "global-first", "none"] = "project-first"
     # Where store-delivered (plugin/package) skill roots rank against the
-    # native paths. "after-native" (gemini, copilot: proven) keeps plugin
-    # roots below every native path; "before-native" (pi: packages resolve
-    # ahead of native dirs and loadSkills is first-wins) puts them above.
+    # native paths. "after-native" keeps plugin roots below every native
+    # path (gemini, copilot, and pi: pi resolves packages first in time but
+    # resourcePrecedenceRank sorts them last); "before-native" puts them
+    # above (opt-in for a harness that truly wins with packages).
     plugin_order: Literal["after-native", "before-native"] = "after-native"
     recursive: bool = True
     root_md_paths: list[str] = Field(default_factory=list)

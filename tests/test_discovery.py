@@ -155,12 +155,13 @@ def test_discover_appends_plugin_roots_after_native(tmp_path):
     assert plug.order > max(native_orders)  # plugin roots rank below native
 
 
-def test_discover_pi_package_roots_rank_above_native(tmp_path):
-    # pi resolves packages BEFORE every native dir (package-manager.js
-    # resolve(): resolvePackageSources runs ahead of addAutoDiscovered-
-    # Resources) and loadSkills keeps the first same-name skill, so a
-    # package skill must out-rank every native one -- the inverse of the
-    # gemini/copilot rule tested above.
+def test_discover_pi_package_roots_rank_below_native(tmp_path):
+    # pi resolves packages first in time (package-manager.js resolve():
+    # resolvePackageSources runs ahead of addAutoDiscoveredResources), but
+    # toResolvedPaths() sorts every resource by resourcePrecedenceRank,
+    # where package=4 ranks below project auto=1 and user auto=3, and
+    # loadSkills keeps the first same-name skill. So a package skill must
+    # rank BELOW every native one, same as the gemini/copilot rule above.
     h = get("pi")
     home, proj = tmp_path / "home", tmp_path / "proj"
     proj.mkdir()
@@ -182,7 +183,7 @@ def test_discover_pi_package_roots_rank_above_native(tmp_path):
     plug = by_name["sp-skill"]
     native_orders = [i.order for i in instances if i.plugin is None]
     assert plug.plugin is not None and plug.plugin.name == "sp"
-    assert plug.order < min(native_orders)  # pi packages rank ABOVE native
+    assert plug.order > max(native_orders)  # pi packages rank BELOW native
 
 
 def test_discover_skips_disabled_plugins(tmp_path):
