@@ -140,12 +140,15 @@ def test_scan_unknown_harness_errors(tmp_path):
 
 
 def test_scan_scoped_harness_drops_cross_harness_findings(tmp_path):
+    from tests.helpers import grant_pi_trust
+
     proj = tmp_path / "proj"
     content = "---\nname: same\ndescription: d\n---\nbody\n"
     for rel in [".claude/skills/same", ".pi/skills/same"]:
         d = proj / rel
         d.mkdir(parents=True)
         (d / "SKILL.md").write_text(content)
+    grant_pi_trust(tmp_path / "home", proj)
     full = scan(tmp_path)
     assert "exact-duplicate" in full.output
     scoped = scan(tmp_path, "--harness", "pi")

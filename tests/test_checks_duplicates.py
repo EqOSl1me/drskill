@@ -7,6 +7,7 @@ from drskill.discovery import discover
 from drskill.harnesses import load_harnesses
 from drskill.ledger import Config
 from drskill.resolution import build_world
+from tests.helpers import grant_pi_trust
 
 PAYLOAD = "'; echo pwned; '"
 
@@ -18,6 +19,8 @@ BODY = (
 
 
 def world_from(proj, home, harness_ids=("claude-code",)):
+    if "pi" in harness_ids:
+        grant_pi_trust(home, proj)
     hs = [h for h in load_harnesses() if h.id in harness_ids]
     instances, broken = [], []
     for h in hs:

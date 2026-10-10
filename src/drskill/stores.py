@@ -19,9 +19,12 @@ also break legitimate out-of-store installs (codex "local" version dirs).
 from __future__ import annotations
 
 import json
+import re
 import tomllib
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Callable, Literal
+from urllib.parse import unquote, urlparse
 
 from pydantic import BaseModel, Field
 
@@ -34,6 +37,9 @@ class InstalledPlugin(BaseModel):
     scope: Literal["user", "project"] = "user"
     project_path: Path | None = None
     skills_roots: list[Path] = Field(default_factory=list)
+    # Explicit skill files a store contributes (pi package skill dirs may
+    # hold bare top-level .md skills alongside SKILL.md dirs).
+    skill_files: list[Path] = Field(default_factory=list)
     enabled: bool = True
     recursive: bool = True
     evidence: Path
@@ -431,12 +437,498 @@ def _droid(home: Path, project_root: Path) -> tuple[list[InstalledPlugin], list[
     return out, unreadable
 
 
+# pi (pi coding agent): packages are declared in a settings.json `packages`
+# array -- user scope at ~/.pi/agent/settings.json, project scope at
+# <cwd>/.pi/settings.json, read only after project trust (granted per dir in
+# ~/.pi/agent/trust.json; findNearestTrustEntry walks cwd upward and the
+# nearest boolean entry wins, trust-manager.js:21-33, settings-manager.js
+# 257-260). Entries are source strings or {source, autoload} objects
+# (package-manager.js resolvePackageSources: pkg may be either).
+# Install roots (package-manager.js:1771-1812, getBaseDirForScope:1826):
+# npm:<spec> -> <base>/npm/node_modules/<name>, with the @version stripped
+# by parseNpmSpec's regex (scoped @names stay intact); git sources ->
+# <base>/git/<host>/<owner>/<repo>, ref dropped from the path; local paths
+# resolve against the scope's base dir (user: the agent dir; project:
+# <cwd>/.pi). base = <home>/.pi/agent for user, <cwd>/.pi for project.
+# NOT modeled (skipped, never guessed): legacy global-npm installs (npm
+# root -g / pnpm global; resolving them means spawning a package manager,
+# which drskill never does), PI_CODING_AGENT_DIR overrides (config.js:491;
+# the agent dir is fixed to <home>/.pi/agent, matching harnesses.toml), and
+# exotic hosted-git spellings pi accepts via hosted-git-info.
+# Skills (collectPackageResources + readPiManifest): the package.json `pi`
+# manifest's skills entries resolve to skill files (globs expand, hidden
+# segments dropped); !/+/- entries filter them (applyPatterns) and an
+# object entry's `skills` filter narrows further (empty disables all).
+# Bare top-level .md files in a skill dir count as skills. With no `pi`
+# manifest the conventional skills/ dir loads; a manifest without a valid
+# skills field contributes nothing.
+# Precedence (package-manager.js resolve():707-712, dedupePackages): project
+# packages resolve FIRST so cwd resources win collisions; equal identities
+# (npm:<name> / git:<host>/<path> / local resolved path) dedupe with project
+# winning -- except a project entry with autoload:false, which is a delta
+# over the user-scope copy and keeps BOTH. autoload:false (exact) disables.
+_PI_AGENT_SUBDIR = Path(".pi") / "agent"
+_PI_NPM_SPEC_RE = re.compile(r"(@?[^@]+(?:/[^@]+)?)(?:@(.+))?")
+_PI_SCP_RE = re.compile(r"git@([^:]+):(.+)")
+
+
+def _pi_read_json(path: Path, unreadable: list[str]):
+    """JSON with BOM tolerated (pi stripBom); None + unreadable when bad."""
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        unreadable.append(str(path))
+        return None
+
+
+def _pi_unreadable(path: Path, unreadable: list[str]):
+    if str(path) not in unreadable:
+        unreadable.append(str(path))
+
+
+def _pi_parse_npm_spec(spec: str) -> tuple[str, str | None]:
+    m = _PI_NPM_SPEC_RE.fullmatch(spec)
+    if not m:
+        return spec, None
+    return m.group(1), m.group(2)
+
+
+def _pi_unsafe_git_part(value: str, *, allow_slash: bool) -> bool:
+    """Mirror pi's hasUnsafeGitInstallPart (utils/git.ts): reject NUL,
+    backslash, absolute paths, traversal segments, and (for the host)
+    slashes. Percent-encoded forms are decoded first, like pi."""
+    decoded = unquote(value)
+    for cand in (value, decoded):
+        if "\0" in cand or "\\" in cand or cand.startswith("/"):
+            return True
+        if not allow_slash and "/" in cand:
+            return True
+        if ".." in cand.split("/"):
+            return True
+    return False
+
+
+def _pi_parse_git(source: str) -> tuple[str, str] | None:
+    """(host, owner/repo) for the source shapes pi accepts; None when pi
+    would treat the source as a local path or the shape is unrecognized
+    (skipped rather than guessed). Mirrors parseSource + parseGitUrl +
+    splitRef (package-manager.js:1170, utils/git.js:150)."""
+    s = source.strip()
+    if s.startswith("github:"):
+        s = "github.com/" + s[len("github:"):].lstrip("/")
+    elif s.startswith("git:"):
+        s = s[len("git:"):].strip()
+    elif not (_PI_SCP_RE.match(s) or re.match(r"^(https?|ssh|git)://", s)):
+        return None  # anything else is a local path in pi
+    repo, _, _frag_ref = s.partition("#")  # "#ref" suffixes split first
+    if not repo:
+        return None
+    m = _PI_SCP_RE.fullmatch(repo)
+    if m:
+        host, path = m.group(1), m.group(2)
+        if "@" in path:  # scp-like: first "@" in the path splits the ref
+            path = path.split("@", 1)[0]
+    elif "://" in repo:
+        try:
+            parsed = urlparse(repo)
+        except ValueError:
+            return None
+        host = parsed.netloc.rsplit("@", 1)[-1]  # drop ssh user
+        path = parsed.path.lstrip("/")
+        if "@" in path:
+            path = path.split("@", 1)[0]
+    else:
+        # bare host/owner/repo[@ref]: host up to the first "/", ref at "@"
+        slash = repo.find("/")
+        if slash < 0:
+            return None
+        host = repo[:slash]
+        path = repo[slash + 1:]
+        if "@" in path:
+            path = path.split("@", 1)[0]
+    raw_path = path
+    path = path.removesuffix(".git").strip("/")
+    parts = path.split("/")
+    # pi requires at least two path components (host/<path>), so nested
+    # hosts like gitlab subgroups are valid; it separately rejects unsafe
+    # parts (traversal, absolute, backslash) when building the source.
+    if not host or len(parts) < 2 or not all(parts):
+        return None
+    if raw_path.startswith("/") or path.startswith("/"):
+        return None
+    if _pi_unsafe_git_part(host, allow_slash=False) or _pi_unsafe_git_part(path, allow_slash=True):
+        return None
+    return host, path
+
+
+def _pi_read_settings(
+    path: Path, unreadable: list[str]
+) -> list[tuple[str, bool, list[str] | None]] | None:
+    """Declarations from a settings.json: (source, enabled, skills_filter)
+    tuples; skills_filter is the object entry's per-resource `skills`
+    pattern list, or None when absent. None (the whole result) when the
+    file exists but cannot be honored (surfaced as unreadable, matching the
+    claude-code adapter's whole-file contract)."""
+    if not path.is_file():
+        return []
+    data = _pi_read_json(path, unreadable)
+    if data is None:
+        return None
+    if not isinstance(data, dict):
+        _pi_unreadable(path, unreadable)
+        return None
+    if "packages" not in data:
+        return []  # no packages key is the normal case
+    pkgs = data["packages"]
+    if not isinstance(pkgs, list):
+        _pi_unreadable(path, unreadable)
+        return None
+    out: list[tuple[str, bool, list[str] | None]] = []
+    for entry in pkgs:
+        if isinstance(entry, str):
+            out.append((entry, True, None))
+        elif isinstance(entry, dict) and isinstance(entry.get("source"), str):
+            skills = entry.get("skills")
+            if skills is None:
+                flt: list[str] | None = None
+            elif isinstance(skills, list) and all(isinstance(s, str) for s in skills):
+                flt = skills
+            else:
+                _pi_unreadable(path, unreadable)
+                return None
+            out.append((entry["source"], entry.get("autoload") is not False, flt))
+        else:
+            _pi_unreadable(path, unreadable)
+            return None
+    return out
+
+
+def project_trusted(
+    trust_path: Path, project_root: Path, unreadable: list[str] | None = None
+) -> bool:
+    """pi's ProjectTrustStore: trust.json maps canonical dirs to boolean
+    decisions; the nearest ancestor entry of cwd wins, and only an exact
+    true grants trust (trust-manager.js:21-33)."""
+    if not trust_path.is_file():
+        return False
+    data = _pi_read_json(trust_path, unreadable if unreadable is not None else [])
+    if not isinstance(data, dict):
+        return False  # corrupt -> pi reads {} -> untrusted (surfaced above)
+    cand = project_root.resolve()
+    while True:
+        v = data.get(str(cand))
+        if isinstance(v, bool):
+            return v
+        if cand.parent == cand:
+            return False
+        cand = cand.parent
+
+
+def _pi_identity(source: str, scope: str, agent: Path, proj_pi: Path) -> str | None:
+    """pi's getPackageIdentity: remote sources are scope-independent,
+    local paths resolve against the scope's base dir."""
+    if source.startswith("npm:"):
+        name, _ = _pi_parse_npm_spec(source[len("npm:"):].strip())
+        return f"npm:{name}"
+    git = _pi_parse_git(source)
+    if git is not None:
+        return f"git:{git[0]}/{git[1]}"
+    p = Path(source).expanduser()
+    base = agent if scope == "user" else proj_pi
+    return "local:" + str(p if p.is_absolute() else (base / p).resolve())
+
+
+def _pi_install_root(source: str, scope: str, agent: Path, proj_pi: Path):
+    """-> (package root dir, fallback identity name) or None when the
+    package is not installed (or is a local file: those load as
+    extensions, which carry no skills)."""
+    base = agent if scope == "user" else proj_pi
+    if source.startswith("npm:"):
+        name, _ = _pi_parse_npm_spec(source[len("npm:"):].strip())
+        return base / "npm" / "node_modules" / name, name
+    git = _pi_parse_git(source)
+    if git is not None:
+        host, path = git
+        return base / "git" / host / path, path.rsplit("/", 1)[-1]
+    p = Path(source).expanduser()
+    p = p if p.is_absolute() else base / p
+    if not p.exists() or p.is_file():
+        return None
+    return p, p.name
+
+
+def _pi_collect_skill_files(path: Path) -> list[Path]:
+    """Files pi's collectFilesFromPaths(path, "skills") yields: an existing
+    file is taken verbatim, a directory is enumerated like
+    collectSkillEntries(dir, "pi")."""
+    if path.is_file():
+        return [path]
+    if not path.is_dir():
+        return []
+    return _pi_collect_skill_entries(path, path)
+
+
+def _pi_collect_skill_entries(directory: Path, root: Path) -> list[Path]:
+    """Mirror collectSkillEntries(dir, mode="pi"): a directory holding
+    SKILL.md contributes just that file; otherwise bare top-level .md files
+    count (only at the original root) and subdirectories recurse."""
+    if (directory / "SKILL.md").is_file():
+        return [directory / "SKILL.md"]
+    out: list[Path] = []
+    try:
+        entries = sorted(directory.iterdir(), key=lambda p: p.name)
+    except OSError:
+        return []
+    for entry in entries:
+        if entry.name.startswith(".") or entry.name == "node_modules":
+            continue
+        if entry.is_file() and entry.name.endswith(".md") and directory == root:
+            out.append(entry)
+        elif entry.is_dir():
+            out.extend(_pi_collect_skill_entries(entry, root))
+    return out
+
+
+def _pi_manifest_skill_files(root: Path, entries: list[str]) -> list[Path]:
+    """collectFilesFromManifestEntries: resolve source entries (globs
+    expand with hidden segments dropped) to skill files; !/+/- entries are
+    override patterns, not sources."""
+    files: list[Path] = []
+    for e in entries:
+        if e.startswith(("!", "+", "-")):
+            continue
+        if "*" in e or "?" in e:
+            pattern = e[2:] if e.startswith("./") else e
+            for m in sorted(root.glob(pattern)):
+                try:
+                    rel = m.relative_to(root)
+                except ValueError:
+                    continue
+                if any(p != ".." and p.startswith(".") for p in rel.parts):
+                    continue  # expandPackageGlob drops hidden segments
+                files.extend(_pi_collect_skill_files(m))
+        else:
+            files.extend(_pi_collect_skill_files(root / e))
+    return _dedupe_paths(files)
+
+
+def _dedupe_paths(paths: list[Path]) -> list[Path]:
+    out: list[Path] = []
+    seen: set[str] = set()
+    for p in paths:
+        if str(p) not in seen:
+            seen.add(str(p))
+            out.append(p)
+    return out
+
+
+def _pi_norm_pattern(pattern: str) -> str:
+    p = pattern.replace("\\", "/")
+    return p[2:] if p.startswith("./") else p
+
+
+def _pi_matches_pattern(file: Path, pattern: str, base: Path) -> bool:
+    """matchesAnyPattern: glob against the path relative to base, the
+    basename, the absolute posix path, and (for SKILL.md) the parent dir."""
+    pat = _pi_norm_pattern(pattern)
+    try:
+        rel = file.relative_to(base).as_posix()
+    except ValueError:
+        rel = file.as_posix()
+    candidates = [rel, file.name, file.as_posix()]
+    if file.name == "SKILL.md":
+        parent = file.parent
+        try:
+            parent_rel = parent.relative_to(base).as_posix()
+        except ValueError:
+            parent_rel = parent.as_posix()
+        candidates += [parent_rel, parent.name, parent.as_posix()]
+    return any(fnmatchcase(c, pat) for c in candidates)
+
+
+def _pi_matches_exact(file: Path, pattern: str, base: Path) -> bool:
+    """matchesAnyExactPattern: exact rel/abs match, plus the SKILL.md
+    parent dir, with a leading ./ stripped."""
+    pat = _pi_norm_pattern(pattern)
+    try:
+        rel = file.relative_to(base).as_posix()
+    except ValueError:
+        rel = file.as_posix()
+    if pat == rel or pat == file.as_posix():
+        return True
+    if file.name == "SKILL.md":
+        parent = file.parent
+        try:
+            parent_rel = parent.relative_to(base).as_posix()
+        except ValueError:
+            parent_rel = parent.as_posix()
+        if pat == parent_rel or pat == parent.as_posix():
+            return True
+    return False
+
+
+def _pi_apply_patterns(files: list[Path], patterns: list[str], base: Path) -> list[Path]:
+    """applyPatterns: plain includes narrow the set (or all when none),
+    ! excludes, + force-includes exact paths, - force-excludes exact
+    paths."""
+    includes: list[str] = []
+    excludes: list[str] = []
+    force_includes: list[str] = []
+    force_excludes: list[str] = []
+    for p in patterns:
+        if p.startswith("+"):
+            force_includes.append(p[1:])
+        elif p.startswith("-"):
+            force_excludes.append(p[1:])
+        elif p.startswith("!"):
+            excludes.append(p[1:])
+        else:
+            includes.append(p)
+    result = (
+        [f for f in files if any(_pi_matches_pattern(f, p, base) for p in includes)]
+        if includes else list(files)
+    )
+    if excludes:
+        result = [
+            f for f in result
+            if not any(_pi_matches_pattern(f, p, base) for p in excludes)
+        ]
+    if force_includes:
+        for f in files:
+            if f not in result and any(_pi_matches_exact(f, p, base) for p in force_includes):
+                result.append(f)
+    if force_excludes:
+        result = [
+            f for f in result
+            if not any(_pi_matches_exact(f, p, base) for p in force_excludes)
+        ]
+    return result
+
+
+def _pi_skill_entries(
+    root: Path, filter_patterns: list[str] | None
+) -> tuple[list[Path], list[Path]]:
+    """(skill dirs, bare skill files) a pi package contributes, applying
+    the manifest's !/+/- overrides and an object entry's per-resource
+    `skills` filter (collectPackageResources / applyPatterns)."""
+    data = _pi_read_json(root / "package.json", [])
+    pi = data.get("pi") if isinstance(data, dict) else None
+    if isinstance(pi, dict):
+        raw = pi.get("skills")
+        manifest_skills = (
+            raw if isinstance(raw, list) and all(isinstance(e, str) for e in raw)
+            else None
+        )
+    else:
+        manifest_skills = None
+    # collectManifestFiles falls back to the conventional dir when an
+    # object-entry filter is present but the manifest has no usable skills
+    # entries; without a filter, a present `pi` manifest contributes only
+    # its skills field (no convention fallback).
+    if not isinstance(pi, dict):
+        use_convention = True  # no pi manifest at all
+    elif manifest_skills is None:
+        use_convention = False  # pi manifest without valid skills: no fallback
+    else:
+        use_convention = filter_patterns is not None and len(manifest_skills) == 0
+    if use_convention:
+        conv = root / "skills"
+        enabled = _pi_collect_skill_entries(conv, conv) if conv.is_dir() else []
+    else:
+        source_files = _pi_manifest_skill_files(root, manifest_skills or [])
+        overrides = [e for e in (manifest_skills or []) if e.startswith(("!", "+", "-"))]
+        enabled = _pi_apply_patterns(source_files, overrides, root) if overrides else source_files
+    if filter_patterns is not None:
+        enabled = (
+            [] if len(filter_patterns) == 0
+            else _pi_apply_patterns(enabled, filter_patterns, root)
+        )
+    dirs: list[Path] = []
+    files: list[Path] = []
+    for f in enabled:
+        if f.name == "SKILL.md":
+            dirs.append(f.parent)
+        else:
+            files.append(f)
+    return _dedupe_paths(dirs), _dedupe_paths(files)
+
+
+def _pi_pkg_fields(root: Path, fallback_name: str) -> tuple[str, str | None]:
+    """Name/version from package.json when readable; the checkout-derived
+    fallback otherwise (other adapters str()-wrap versions too)."""
+    data = _pi_read_json(root / "package.json", [])
+    name, version = fallback_name, None
+    if isinstance(data, dict):
+        if isinstance(data.get("name"), str):
+            name = data["name"]
+        v = data.get("version")
+        if isinstance(v, (str, int, float)) and not isinstance(v, bool):
+            version = str(v)
+    return name, version
+
+
+def _pi(home: Path, project_root: Path) -> tuple[list[InstalledPlugin], list[str]]:
+    unreadable: list[str] = []
+    agent = home / _PI_AGENT_SUBDIR
+    proj_pi = project_root / ".pi"
+    user_path = agent / "settings.json"
+    user_entries = _pi_read_settings(user_path, unreadable)
+    project_entries: list[tuple[str, bool]] = []
+    proj_path = proj_pi / "settings.json"
+    if project_trusted(agent / "trust.json", project_root, unreadable):
+        project_entries = _pi_read_settings(proj_path, unreadable) or []
+    # project first so cwd resources win collisions; dedupe by identity
+    ordered = [("project", s, en, flt, proj_path) for s, en, flt in project_entries]
+    ordered += [("user", s, en, flt, user_path) for s, en, flt in user_entries or []]
+    result: list[tuple[str, str, bool, list[str] | None, Path]] = []
+    seen: dict[str, int] = {}
+    for scope, source, enabled, flt, evidence in ordered:
+        ident = _pi_identity(source, scope, agent, proj_pi)
+        if ident is None:
+            continue
+        idx = seen.get(ident)
+        if idx is None:
+            seen[ident] = len(result)
+            result.append((scope, source, enabled, flt, evidence))
+        elif result[idx][0] == "project" and scope == "user":
+            if result[idx][2] is False:  # project autoload:false delta keeps both
+                result.append((scope, source, enabled, flt, evidence))
+        elif scope == "project":
+            result[idx] = (scope, source, enabled, flt, evidence)  # project wins
+    out: list[InstalledPlugin] = []
+    for scope, source, enabled, flt, evidence in result:
+        root = _pi_install_root(source, scope, agent, proj_pi)
+        if root is None:
+            continue
+        pkg_root, fallback = root
+        skills_roots, skill_files = _pi_skill_entries(pkg_root, flt)
+        if not skills_roots and not skill_files:
+            continue
+        name, version = _pi_pkg_fields(pkg_root, fallback)
+        out.append(InstalledPlugin(
+            harness="pi",
+            name=name,
+            version=version,
+            scope=scope,
+            project_path=project_root if scope == "project" else None,
+            skills_roots=skills_roots,
+            skill_files=skill_files,
+            enabled=enabled,
+            recursive=True,
+            evidence=evidence,
+        ))
+    return out, unreadable
+
+
 ADAPTERS: dict[str, Callable[[Path, Path], tuple[list[InstalledPlugin], list[str]]]] = {
     "claude-code": _claude_code,
     "codex": _codex,
     "gemini-cli": _gemini_cli,
     "copilot": _copilot,
     "droid": _droid,
+    "pi": _pi,
 }
 
 # Best-known primary state path per harness, used only by the belt-and-braces
@@ -447,6 +939,7 @@ _PRIMARY_STATE_PATH: dict[str, Callable[[Path], Path]] = {
     "gemini-cli": lambda home: home / ".gemini" / "extensions" / "extension-enablement.json",
     "copilot": lambda home: home / ".copilot" / "config.json",
     "droid": lambda home: home / ".factory" / "plugins" / "installed_plugins",
+    "pi": lambda home: home / ".pi" / "agent" / "settings.json",
 }
 
 

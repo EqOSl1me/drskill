@@ -21,8 +21,14 @@ class HarnessDef(BaseModel):
     # this); discovery enumerates in project-first order for determinism and
     # resolution skips shadow marking entirely.
     search_order: Literal["project-first", "global-first", "none"] = "project-first"
+    # Where store-delivered (plugin/package) skill roots rank against the
+    # native paths.
+    plugin_order: Literal["after-native", "before-native"] = "after-native"
     recursive: bool = True
     root_md_paths: list[str] = Field(default_factory=list)
+    # When set, project_* paths are scanned only for a trusted project
+    # (pi: ~/.pi/agent/trust.json, nearest ancestor true wins).
+    project_trust_path: str | None = None
     # Slash-command file roots, scanned recursively for *.md; commands are
     # explicitly invoked, so they join only the injection checks, never
     # budget/routing accounting.
@@ -35,12 +41,16 @@ class HarnessDef(BaseModel):
     mcp_verified: bool = False
 
     def search_paths(
-        self, project_root: Path, home: Path, global_only: bool = False
+        self,
+        project_root: Path,
+        home: Path,
+        global_only: bool = False,
+        project_trusted: bool = True,
     ) -> list[tuple[Path, str, str]]:
         """(directory, scope, spec_str) triples in precedence order."""
         proj = [(project_root / s, "project", s) for s in self.project_paths]
         glob = [(home / s.removeprefix("~/"), "user", s) for s in self.global_paths]
-        if global_only:
+        if global_only or not project_trusted:
             return glob
         if self.search_order == "global-first":
             return glob + proj

@@ -36,9 +36,11 @@ mcp_format = "mcp-json"
 mcp_format_global = "claude-user-json"
 mcp_verified = true
 
-# Verified against pi docs (packages/coding-agent/docs/skills.md):
-# global paths load first and first-found wins; bare .md files count as
-# skills only in the two pi-native directories.
+# Verified against pi source 1.1.0: project dirs load before user dirs and
+# loadSkills is first-wins, so project shadows user; packages rank below
+# native (resourcePrecedenceRank: project auto=1, user auto=3, package=4);
+# bare .md files count as skills only in the two pi-native dirs
+# (dist/core/package-manager.js:1986-2066,2124; skills.js:326-346).
 [[harness]]
 id = "pi"
 display_name = "Pi"
@@ -47,9 +49,10 @@ precedence_verified = true
 detect = [".pi", "~/.pi"]
 project_paths = [".pi/skills", ".agents/skills"]
 global_paths = ["~/.pi/agent/skills", "~/.agents/skills"]
-search_order = "global-first"
+search_order = "project-first"
 recursive = true
 root_md_paths = [".pi/skills", "~/.pi/agent/skills"]
+project_trust_path = "~/.pi/agent/trust.json"
 
 # Verified against https://cursor.com/docs/skills.md and
 # https://cursor.com/help/customization/skills, 2026-07-19:

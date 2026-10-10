@@ -7,11 +7,14 @@ from drskill.discovery import discover
 from drskill.harnesses import load_harnesses
 from drskill.ledger import Config
 from drskill.resolution import build_world
+from tests.helpers import grant_pi_trust
 
 PAYLOAD = "'; echo pwned; '"
 
 
 def world_from(proj, home, harness_ids=("claude-code",)):
+    if "pi" in harness_ids:
+        grant_pi_trust(home, proj)
     hs = [h for h in load_harnesses() if h.id in harness_ids]
     instances, broken = [], []
     for h in hs:
@@ -84,22 +87,22 @@ def test_no_double_load_when_shadowed(tmp_path):
 
 
 def test_name_shadow_conflicting_winners_stay_distinct(tmp_path):
-    # pi is global-first, gemini-cli is project-first; both read .agents/skills
-    # (project) and ~/.agents/skills (user). The two harnesses disagree on
-    # which copy wins, so merging their findings into one (as a
+    # cline is global-first, gemini-cli is project-first; both read
+    # .agents/skills (project) and ~/.agents/skills (user). The two harnesses
+    # disagree on which copy wins, so merging their findings into one (as a
     # content-hash-only fingerprint would) would report the wrong winner for
     # whichever harness lost the merge.
     proj, home = tmp_path / "p", tmp_path / "h"
     write(proj, ".agents/skills", "tool", body="project version")
     write(home, ".agents/skills", "tool", body="user version")
-    findings = run_all(world_from(proj, home, ("pi", "gemini-cli")), Config())
+    findings = run_all(world_from(proj, home, ("cline", "gemini-cli")), Config())
     shadows = find(findings, "name-shadow")
     assert len(shadows) == 2
-    pi_finding = next(f for f in shadows if "pi" in f.harnesses)
+    cline_finding = next(f for f in shadows if "cline" in f.harnesses)
     gemini_finding = next(f for f in shadows if "gemini-cli" in f.harnesses)
-    assert pi_finding.fingerprint != gemini_finding.fingerprint
-    # pi: global-first -> the user/global copy wins
-    assert "user" in pi_finding.message
+    assert cline_finding.fingerprint != gemini_finding.fingerprint
+    # cline: global-first -> the user/global copy wins
+    assert "user" in cline_finding.message
     # gemini-cli: project-first -> the project copy wins
     assert "project" in gemini_finding.message
 
@@ -148,6 +151,12 @@ def test_diverged_copies_fires_across_harnesses(tmp_path):
     proj, home = tmp_path / "p", tmp_path / "h"
     _write_named(proj, ".claude/skills", "geo", "new body with extra sections\n" * 3)
     _write_named(proj, ".pi/skills", "geo", "old body\n")
+    # Set explicit distinct mtimes: back-to-back writes can share a stamp on
+    # filesystems with coarse timestamp resolution, which would trip the tie
+    # branch and drop the newest:/older: labels (see jxtj).
+    older, newer = 1750000000, 1750000001
+    os.utime(proj / ".pi/skills/geo/SKILL.md", (older, older))
+    os.utime(proj / ".claude/skills/geo/SKILL.md", (newer, newer))
     findings = run_all(world_from(proj, home, ("claude-code", "pi")), Config())
     hits = find(findings, "diverged-copies")
     assert len(hits) == 1

@@ -8,6 +8,7 @@ from drskill.discovery import discover
 from drskill.harnesses import load_harnesses
 from drskill.ledger import Config
 from drskill.pipeline import run_scan
+from tests.helpers import grant_pi_trust
 
 PAYLOAD = "'; echo pwned; '"
 
@@ -113,6 +114,7 @@ def test_lockfile_entry_beats_linked(tmp_path):
     import json as _json
     proj, home = tmp_path / "p", tmp_path / "h"
     home.mkdir()
+    grant_pi_trust(home, proj)
     d = proj / ".agents" / "skills" / "pinned"
     d.mkdir(parents=True)
     (d / "SKILL.md").write_text("---\nname: pinned\ndescription: d\n---\nbody\n")
@@ -129,6 +131,7 @@ def test_lockfile_skill_path_lands_in_provenance(tmp_path):
     import json as _json
     proj, home = tmp_path / "p", tmp_path / "h"
     home.mkdir()
+    grant_pi_trust(home, proj)
     d = proj / ".agents" / "skills" / "pinned"
     d.mkdir(parents=True)
     (d / "SKILL.md").write_text("---\nname: pinned\ndescription: d\n---\nbody\n")
@@ -163,6 +166,7 @@ def test_lockfile_root_skill_path_is_empty_string(tmp_path):
     import json as _json
     proj, home = tmp_path / "p", tmp_path / "h"
     home.mkdir()
+    grant_pi_trust(home, proj)
     d = proj / ".agents" / "skills" / "pinned"
     d.mkdir(parents=True)
     (d / "SKILL.md").write_text("---\nname: pinned\ndescription: d\n---\nbody\n")

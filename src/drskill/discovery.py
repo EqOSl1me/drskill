@@ -5,7 +5,7 @@ from pathlib import Path
 
 from drskill.harnesses import HarnessDef
 from drskill.models import BrokenSymlink, RawInstance
-from drskill.stores import discover_plugins
+from drskill.stores import discover_plugins, project_trusted
 
 
 def _walk_dirs(base: Path):
@@ -76,8 +76,31 @@ def discover(
 ) -> tuple[list[RawInstance], list[BrokenSymlink], list[tuple[str, str]]]:
     instances: list[RawInstance] = []
     broken: list[BrokenSymlink] = []
-    native_paths = h.search_paths(project_root, home, global_only)
-    for order, (base, scope, spec_str) in enumerate(native_paths):
+    # Some harnesses (pi) gate project dirs on a project-trust file.
+    project_trusted_here = True
+    if h.project_trust_path:
+        trust_path = home / h.project_trust_path.removeprefix("~/")
+        project_trusted_here = project_trusted(trust_path, project_root)
+    native_paths = h.search_paths(
+        project_root, home, global_only, project_trusted=project_trusted_here
+    )
+    # Store-delivered skills rank per plugin_order: most harnesses (gemini,
+    # copilot, pi) keep plugin roots below every native path.
+    plugins, unreadable_states = discover_plugins(h.id, home, project_root)
+    unreadable = [(h.id, p) for p in unreadable_states]
+    usable = [
+        p for p in plugins
+        if p.enabled and not (global_only and p.scope == "project")
+    ]
+    if h.plugin_order == "before-native":
+        plugin_order_base = 0
+        native_order_base = sum(len(p.skills_roots) for p in usable)
+    else:
+        plugin_order_base = len(native_paths)
+        native_order_base = 0
+    for order, (base, scope, spec_str) in enumerate(
+        native_paths, start=native_order_base
+    ):
         if not base.is_dir():
             continue
         files = _find_skill_files(base, h.recursive)
@@ -105,7 +128,7 @@ def discover(
     # without colliding with native or plugin path indexes.
     command_specs = [(project_root / s, "project", s) for s in h.command_project_paths]
     command_specs += [(home / s.removeprefix("~/"), "user", s) for s in h.command_global_paths]
-    if global_only:
+    if global_only or not project_trusted_here:
         command_specs = [t for t in command_specs if t[1] == "user"]
     for order, (base, scope, _spec) in enumerate(command_specs, start=1000):
         if not base.is_dir():
@@ -120,17 +143,10 @@ def discover(
             )
         broken += [BrokenSymlink(harness=h.id, path=p)
                    for p in _find_broken_symlinks(base, recursive=True)]
-    # Store-delivered skills: enabled plugins' roots rank BELOW every
-    # native path (proven on gemini and copilot; codex keeps its
-    # no-shadowing semantics via search_order "none").
-    plugins, unreadable_states = discover_plugins(h.id, home, project_root)
-    unreadable = [(h.id, p) for p in unreadable_states]
-    order = len(native_paths)
-    for plug in plugins:
-        if not plug.enabled:
-            continue  # disabled plugins' skills demonstrably do not load
-        if global_only and plug.scope == "project":
-            continue
+    # Store-delivered skills: enabled plugins' roots rank per the harness's
+    # plugin_order, above or below every native path.
+    order = plugin_order_base
+    for plug in usable:
         for base in plug.skills_roots:
             if not base.is_dir():
                 order += 1
@@ -150,5 +166,19 @@ def discover(
                 BrokenSymlink(harness=h.id, path=p)
                 for p in _find_broken_symlinks(base, plug.recursive)
             ]
+            order += 1
+        for f in plug.skill_files:
+            if not f.exists():
+                broken.append(BrokenSymlink(harness=h.id, path=f))
+                order += 1
+                continue
+            instances.append(RawInstance(
+                harness=h.id,
+                scope=plug.scope,
+                skill_file=f,
+                via_symlink=False,
+                order=order,
+                plugin=plug,
+            ))
             order += 1
     return instances, broken, unreadable

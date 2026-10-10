@@ -71,7 +71,10 @@ def test_symlink_loop_terminates(tmp_path):
 
 
 def test_pi_root_md_only_in_native_dirs(tmp_path):
+    from tests.helpers import grant_pi_trust
+
     proj, home = tmp_path / "proj", tmp_path / "home"
+    grant_pi_trust(home, proj)
     native = proj / ".pi" / "skills"
     native.mkdir(parents=True)
     (native / "note.md").write_text("a bare skill\n")
@@ -80,6 +83,37 @@ def test_pi_root_md_only_in_native_dirs(tmp_path):
     (universal / "ignored.md").write_text("not a skill here\n")
     instances, _, _u = discover(get("pi"), proj, home)
     assert [i.skill_file.name for i in instances] == ["note.md"]
+
+
+def test_pi_untrusted_project_native_paths_are_not_scanned(tmp_path):
+    # pi only adds project .pi/skills and ancestor .agents/skills when the
+    # project is trusted (package-manager.js addAutoDiscoveredResources:
+    # projectTrusted gates both). An untrusted project copy must not be
+    # scanned, or it would be reported as shadowing the user copy.
+    proj, home = tmp_path / "proj", tmp_path / "home"
+    agent = home / ".pi" / "agent"
+    for root, rel, body in [
+        (proj, ".pi/skills/tool", "project pi"),
+        (proj, ".agents/skills/tool", "project agents"),
+        (home, ".pi/agent/skills/tool", "user pi"),
+    ]:
+        d = root / rel
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text(
+            f"---\nname: tool\ndescription: d\n---\n{body}\n"
+        )
+    instances, _, _ = discover(get("pi"), proj, home)
+    assert [i.skill_file.parent.name for i in instances] == [
+        "tool"
+    ]
+    assert instances[0].scope == "user"
+    # an exact-true ancestor decision grants trust and project paths return
+    agent.mkdir(parents=True, exist_ok=True)
+    (agent / "trust.json").write_text(
+        json.dumps({str(tmp_path.resolve()): True}), encoding="utf-8"
+    )
+    instances, _, _ = discover(get("pi"), proj, home)
+    assert {i.scope for i in instances} == {"project", "user"}
 
 
 def test_global_only(tree):
@@ -153,6 +187,64 @@ def test_discover_appends_plugin_roots_after_native(tmp_path):
     assert plug.plugin is not None and plug.plugin.name == "sp"
     assert plug.scope == "user"
     assert plug.order > max(native_orders)  # plugin roots rank below native
+
+
+def test_discover_pi_package_roots_rank_below_native(tmp_path):
+    # pi resolves packages first in time (package-manager.js resolve():
+    # resolvePackageSources runs ahead of addAutoDiscoveredResources), but
+    # toResolvedPaths() sorts every resource by resourcePrecedenceRank,
+    # where package=4 ranks below project auto=1 and user auto=3, and
+    # loadSkills keeps the first same-name skill. So a package skill must
+    # rank BELOW every native one, same as the gemini/copilot rule above.
+    h = get("pi")
+    home, proj = tmp_path / "home", tmp_path / "proj"
+    proj.mkdir()
+    agent = home / ".pi" / "agent"
+    agent.mkdir(parents=True)
+    (agent / "settings.json").write_text(
+        json.dumps({"packages": ["git:github.com/obra/sp"]}), encoding="utf-8"
+    )
+    pkg = agent / "git" / "github.com" / "obra" / "sp"
+    pkg.mkdir(parents=True)
+    (pkg / "package.json").write_text(
+        json.dumps({"name": "sp", "pi": {"skills": ["./skills"]}}), encoding="utf-8"
+    )
+    write_skill(pkg / "skills", "sp-skill")
+    write_skill(agent / "skills", "native-skill")  # ~/.pi/agent/skills
+    instances, _broken, unreadable = discover(h, proj, home)
+    assert unreadable == []
+    by_name = {i.skill_file.parent.name: i for i in instances}
+    plug = by_name["sp-skill"]
+    native_orders = [i.order for i in instances if i.plugin is None]
+    assert plug.plugin is not None and plug.plugin.name == "sp"
+    assert plug.order > max(native_orders)  # pi packages rank BELOW native
+
+
+def test_discover_pi_package_top_level_markdown_skill(tmp_path):
+    # A conventional package skill root may hold bare top-level .md skills
+    # alongside SKILL.md dirs; discovery must register both.
+    h = get("pi")
+    home, proj = tmp_path / "home", tmp_path / "proj"
+    proj.mkdir()
+    agent = home / ".pi" / "agent"
+    agent.mkdir(parents=True)
+    (agent / "settings.json").write_text(
+        json.dumps({"packages": ["git:github.com/obra/sp"]}), encoding="utf-8"
+    )
+    pkg = agent / "git" / "github.com" / "obra" / "sp"
+    skills = pkg / "skills"
+    skills.mkdir(parents=True)
+    (skills / "review.md").write_text(
+        "---\nname: review\ndescription: d\n---\nbody\n", encoding="utf-8"
+    )
+    write_skill(skills, "kept")
+    instances, _broken, unreadable = discover(h, proj, home)
+    assert unreadable == []
+    names = {i.skill_file.name for i in instances}
+    assert names == {"SKILL.md", "review.md"}
+    by_file = {i.skill_file.name: i for i in instances}
+    assert by_file["review.md"].plugin is not None
+    assert by_file["review.md"].plugin.name == "sp"
 
 
 def test_discover_skips_disabled_plugins(tmp_path):
