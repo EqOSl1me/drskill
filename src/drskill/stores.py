@@ -23,7 +23,7 @@ import re
 import tomllib
 from pathlib import Path
 from typing import Callable, Literal
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from pydantic import BaseModel, Field
 
@@ -494,6 +494,21 @@ def _pi_parse_npm_spec(spec: str) -> tuple[str, str | None]:
     return m.group(1), m.group(2)
 
 
+def _pi_unsafe_git_part(value: str, *, allow_slash: bool) -> bool:
+    """Mirror pi's hasUnsafeGitInstallPart (utils/git.ts): reject NUL,
+    backslash, absolute paths, traversal segments, and (for the host)
+    slashes. Percent-encoded forms are decoded first, like pi."""
+    decoded = unquote(value)
+    for cand in (value, decoded):
+        if "\0" in cand or "\\" in cand or cand.startswith("/"):
+            return True
+        if not allow_slash and "/" in cand:
+            return True
+        if ".." in cand.split("/"):
+            return True
+    return False
+
+
 def _pi_parse_git(source: str) -> tuple[str, str] | None:
     """(host, owner/repo) for the source shapes pi accepts; None when pi
     would treat the source as a local path or the shape is unrecognized
@@ -532,9 +547,17 @@ def _pi_parse_git(source: str) -> tuple[str, str] | None:
         path = repo[slash + 1:]
         if "@" in path:
             path = path.split("@", 1)[0]
+    raw_path = path
     path = path.removesuffix(".git").strip("/")
     parts = path.split("/")
-    if not host or len(parts) != 2 or not all(parts):
+    # pi requires at least two path components (host/<path>), so nested
+    # hosts like gitlab subgroups are valid; it separately rejects unsafe
+    # parts (traversal, absolute, backslash) when building the source.
+    if not host or len(parts) < 2 or not all(parts):
+        return None
+    if raw_path.startswith("/") or path.startswith("/"):
+        return None
+    if _pi_unsafe_git_part(host, allow_slash=False) or _pi_unsafe_git_part(path, allow_slash=True):
         return None
     return host, path
 

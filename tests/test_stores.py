@@ -743,6 +743,38 @@ def test_pi_dedupes_equivalent_sources_ignoring_ref(tmp_path):
     assert plugins[0].skills_roots == [pkg / "skills"]
 
 
+def test_pi_nested_git_repository_path(tmp_path):
+    # generic git sources may have more than two path components
+    # (gitlab subgroups); pi stores them under the full host/path
+    # hierarchy (utils/git.ts buildGitSource: path.split("/").length >= 2).
+    home, proj = tmp_path / "home", tmp_path / "proj"
+    proj.mkdir()
+    rel = Path("gitlab.example.com") / "group" / "subgroup" / "pkg"
+    pkg = _pi_pkg(home / ".pi" / "agent" / "git" / rel,
+                  name="pkg", pi={"skills": ["./skills"]})
+    _skill(pkg / "skills", "nested-skill")
+    _pi_settings(home, ["git:gitlab.example.com/group/subgroup/pkg"])
+    plugins, unreadable = discover_plugins("pi", home, proj)
+    assert unreadable == []
+    (p,) = plugins
+    assert p.name == "pkg"
+    assert p.skills_roots == [pkg / "skills"]
+
+
+def test_pi_git_repo_path_traversal_is_rejected(tmp_path):
+    # pi's buildGitSource rejects path traversal / absolute / backslash
+    # parts before deriving an install root; drskill must too.
+    home, proj = tmp_path / "home", tmp_path / "proj"
+    proj.mkdir()
+    _pi_settings(home, [
+        "git:github.com/obra/../evil",
+        "git:github.com/obra/..%2fevil",
+        "git:github.com/obra\\evil",
+    ])
+    plugins, unreadable = discover_plugins("pi", home, proj)
+    assert plugins == [] and unreadable == []
+
+
 def test_pi_project_packages_require_trust(tmp_path):
     home = tmp_path / "home"
     work = tmp_path / "work"
