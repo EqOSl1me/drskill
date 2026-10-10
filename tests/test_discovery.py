@@ -71,7 +71,10 @@ def test_symlink_loop_terminates(tmp_path):
 
 
 def test_pi_root_md_only_in_native_dirs(tmp_path):
+    from tests.helpers import grant_pi_trust
+
     proj, home = tmp_path / "proj", tmp_path / "home"
+    grant_pi_trust(home, proj)
     native = proj / ".pi" / "skills"
     native.mkdir(parents=True)
     (native / "note.md").write_text("a bare skill\n")
@@ -80,6 +83,37 @@ def test_pi_root_md_only_in_native_dirs(tmp_path):
     (universal / "ignored.md").write_text("not a skill here\n")
     instances, _, _u = discover(get("pi"), proj, home)
     assert [i.skill_file.name for i in instances] == ["note.md"]
+
+
+def test_pi_untrusted_project_native_paths_are_not_scanned(tmp_path):
+    # pi only adds project .pi/skills and ancestor .agents/skills when the
+    # project is trusted (package-manager.js addAutoDiscoveredResources:
+    # projectTrusted gates both). An untrusted project copy must not be
+    # scanned, or it would be reported as shadowing the user copy.
+    proj, home = tmp_path / "proj", tmp_path / "home"
+    agent = home / ".pi" / "agent"
+    for root, rel, body in [
+        (proj, ".pi/skills/tool", "project pi"),
+        (proj, ".agents/skills/tool", "project agents"),
+        (home, ".pi/agent/skills/tool", "user pi"),
+    ]:
+        d = root / rel
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text(
+            f"---\nname: tool\ndescription: d\n---\n{body}\n"
+        )
+    instances, _, _ = discover(get("pi"), proj, home)
+    assert [i.skill_file.parent.name for i in instances] == [
+        "tool"
+    ]
+    assert instances[0].scope == "user"
+    # an exact-true ancestor decision grants trust and project paths return
+    agent.mkdir(parents=True, exist_ok=True)
+    (agent / "trust.json").write_text(
+        json.dumps({str(tmp_path.resolve()): True}), encoding="utf-8"
+    )
+    instances, _, _ = discover(get("pi"), proj, home)
+    assert {i.scope for i in instances} == {"project", "user"}
 
 
 def test_global_only(tree):

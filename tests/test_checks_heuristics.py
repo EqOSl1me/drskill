@@ -173,11 +173,14 @@ def test_activation_matches_derived_forms():
 
 
 def test_overlap_excludes_same_name_pairs(tmp_path):
+    from tests.helpers import grant_pi_trust
+
     proj, home = tmp_path / "p", tmp_path / "h"
     write(proj, "docs", PILE_A, body="x" * 40)
     d = proj / ".pi" / "skills" / "docs"
     d.mkdir(parents=True)
     (d / "SKILL.md").write_text(f"---\nname: docs\ndescription: {PILE_A}X\n---\n{'y' * 40}\n")
+    grant_pi_trust(home, proj)
     hs = [h for h in load_harnesses() if h.id in ("claude-code", "pi")]
     instances, broken = [], []
     for h in hs:

@@ -32,6 +32,9 @@ def write_skill(root: Path, name: str, description: str = "d", body: str = "body
 
 
 def world_for(harness_id, proj, home):
+    if harness_id == "pi":
+        from tests.helpers import grant_pi_trust
+        grant_pi_trust(home, proj)
     h = get(harness_id)
     instances, broken, _u = discover(h, proj, home)
     return build_world(instances, {h.id: h}, broken)
@@ -55,12 +58,15 @@ def test_normalize_strips_gh_provenance_and_line_endings():
 
 
 def test_symlink_dedup_one_contributor_many_deployments(tmp_path):
+    from tests.helpers import grant_pi_trust
+
     proj, home = tmp_path / "proj", tmp_path / "home"
     canonical = write_skill(proj / ".agents" / "skills", "shared")
     for d in [proj / ".claude" / "skills"]:
         d.mkdir(parents=True)
         os.symlink(canonical, d / "shared")
     (proj / ".pi").mkdir()
+    grant_pi_trust(home, proj)
     cc, pi = get("claude-code"), get("pi")
     i1, b1, u1 = discover(cc, proj, home)
     i2, b2, u2 = discover(pi, proj, home)

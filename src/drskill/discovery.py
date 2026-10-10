@@ -5,7 +5,7 @@ from pathlib import Path
 
 from drskill.harnesses import HarnessDef
 from drskill.models import BrokenSymlink, RawInstance
-from drskill.stores import discover_plugins
+from drskill.stores import discover_plugins, project_trusted
 
 
 def _walk_dirs(base: Path):
@@ -76,7 +76,15 @@ def discover(
 ) -> tuple[list[RawInstance], list[BrokenSymlink], list[tuple[str, str]]]:
     instances: list[RawInstance] = []
     broken: list[BrokenSymlink] = []
-    native_paths = h.search_paths(project_root, home, global_only)
+    # A harness may gate its project paths on a trust decision (pi's
+    # trust.json); when untrusted, pi never adds project dirs at all.
+    project_trusted_here = True
+    if h.project_trust_path:
+        trust_path = home / h.project_trust_path.removeprefix("~/")
+        project_trusted_here = project_trusted(trust_path, project_root)
+    native_paths = h.search_paths(
+        project_root, home, global_only, project_trusted=project_trusted_here
+    )
     # Store-delivered skills first, because their rank against the native
     # paths is harness-specific: most keep plugin roots BELOW every native
     # path (proven on gemini and copilot; codex keeps its no-shadowing
@@ -125,7 +133,7 @@ def discover(
     # without colliding with native or plugin path indexes.
     command_specs = [(project_root / s, "project", s) for s in h.command_project_paths]
     command_specs += [(home / s.removeprefix("~/"), "user", s) for s in h.command_global_paths]
-    if global_only:
+    if global_only or not project_trusted_here:
         command_specs = [t for t in command_specs if t[1] == "user"]
     for order, (base, scope, _spec) in enumerate(command_specs, start=1000):
         if not base.is_dir():

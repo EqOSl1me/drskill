@@ -1,3 +1,4 @@
+import json
 import tomllib
 from pathlib import Path
 
@@ -22,6 +23,14 @@ def test_conformance_case(case_dir, tmp_path):
     if not home.is_dir():
         home = tmp_path / "empty-home"
         home.mkdir()
+        # Conformance trees are trusted projects; grant pi trust so its
+        # project-native skills load (pi gates them on trust.json).
+        agent = home / ".pi" / "agent"
+        agent.mkdir(parents=True, exist_ok=True)
+        (agent / "trust.json").write_text(
+            json.dumps({str((case_dir / "tree").resolve()): True}),
+            encoding="utf-8",
+        )
     _world, findings = run_scan(case_dir / "tree", home)
     for entry in expect.get("expect", []):
         assert any(matches(f, entry) for f in findings), (

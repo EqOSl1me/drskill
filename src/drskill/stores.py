@@ -592,13 +592,15 @@ def _pi_read_settings(path: Path, unreadable: list[str]) -> list[tuple[str, bool
     return out
 
 
-def _pi_trusted(trust_path: Path, project_root: Path, unreadable: list[str]) -> bool:
+def project_trusted(
+    trust_path: Path, project_root: Path, unreadable: list[str] | None = None
+) -> bool:
     """pi's ProjectTrustStore: trust.json maps canonical dirs to boolean
     decisions; the nearest ancestor entry of cwd wins, and only an exact
     true grants trust (trust-manager.js:21-33)."""
     if not trust_path.is_file():
         return False
-    data = _pi_read_json(trust_path, unreadable)
+    data = _pi_read_json(trust_path, unreadable if unreadable is not None else [])
     if not isinstance(data, dict):
         return False  # corrupt -> pi reads {} -> untrusted (surfaced above)
     cand = project_root.resolve()
@@ -706,7 +708,7 @@ def _pi(home: Path, project_root: Path) -> tuple[list[InstalledPlugin], list[str
     user_entries = _pi_read_settings(user_path, unreadable)
     project_entries: list[tuple[str, bool]] = []
     proj_path = proj_pi / "settings.json"
-    if _pi_trusted(agent / "trust.json", project_root, unreadable):
+    if project_trusted(agent / "trust.json", project_root, unreadable):
         project_entries = _pi_read_settings(proj_path, unreadable) or []
     # project first so cwd resources win collisions; dedupe by identity
     ordered = [("project", s, en, proj_path) for s, en in project_entries]

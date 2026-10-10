@@ -64,6 +64,7 @@ global_paths = ["~/.pi/agent/skills", "~/.agents/skills"]
 search_order = "project-first"
 recursive = true
 root_md_paths = [".pi/skills", "~/.pi/agent/skills"]
+project_trust_path = "~/.pi/agent/trust.json"
 
 # Verified against https://cursor.com/docs/skills.md and
 # https://cursor.com/help/customization/skills, 2026-07-19:
