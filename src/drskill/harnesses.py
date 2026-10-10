@@ -22,16 +22,12 @@ class HarnessDef(BaseModel):
     # resolution skips shadow marking entirely.
     search_order: Literal["project-first", "global-first", "none"] = "project-first"
     # Where store-delivered (plugin/package) skill roots rank against the
-    # native paths. "after-native" keeps plugin roots below every native
-    # path (gemini, copilot, and pi: pi resolves packages first in time but
-    # resourcePrecedenceRank sorts them last); "before-native" puts them
-    # above (opt-in for a harness that truly wins with packages).
+    # native paths.
     plugin_order: Literal["after-native", "before-native"] = "after-native"
     recursive: bool = True
     root_md_paths: list[str] = Field(default_factory=list)
-    # When set, project_* paths are scanned only if the project is trusted
-    # per this file (pi's trust.json: nearest ancestor decision wins, exact
-    # true grants trust). Mirrors pi gating project dirs on projectTrusted.
+    # When set, project_* paths are scanned only for a trusted project
+    # (pi: ~/.pi/agent/trust.json, nearest ancestor true wins).
     project_trust_path: str | None = None
     # Slash-command file roots, scanned recursively for *.md; commands are
     # explicitly invoked, so they join only the injection checks, never

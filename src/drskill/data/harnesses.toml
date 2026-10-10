@@ -36,23 +36,11 @@ mcp_format = "mcp-json"
 mcp_format_global = "claude-user-json"
 mcp_verified = true
 
-# Verified against pi source 1.1.0: addAutoDiscoveredResources() adds the
-# project dirs (.pi/skills, then ancestor-walked .agents/skills) to the
-# accumulator before the user dirs (~/.pi/agent/skills, then ~/.agents/
-# skills), and toResolvedPaths() sorts skill paths by
-# resourcePrecedenceRank (project auto=1 < user auto=3); loadSkills is
-# first-wins on a name collision (skills.js:326-346), so the project copy
-# shadows the user copy. (The bundled skills.md only says "Name collisions
-# keep the first discovered skill", which is consistent once the scan order
-# is read from source.) Bare .md files count as skills only in the two
-# pi-native directories.
-# Store packages: pi resolves packages first in time, but toResolvedPaths()
-# sorts every resource by resourcePrecedenceRank (project auto=1,
-# user auto=3, package=4), so packages rank BELOW all native dirs and a
-# native skill wins a same-name collision (loadSkills is first-wins,
-# skills.js:326-346). Same after-native order as gemini/copilot
-# (dist/core/package-manager.js:707-736, 1986-2066, 2124; verified 1.1.0).
-# plugin_order is left at its after-native default.
+# Verified against pi source 1.1.0: project dirs load before user dirs and
+# loadSkills is first-wins, so project shadows user; packages rank below
+# native (resourcePrecedenceRank: project auto=1, user auto=3, package=4);
+# bare .md files count as skills only in the two pi-native dirs
+# (dist/core/package-manager.js:1986-2066,2124; skills.js:326-346).
 [[harness]]
 id = "pi"
 display_name = "Pi"

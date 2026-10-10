@@ -454,20 +454,14 @@ def _droid(home: Path, project_root: Path) -> tuple[list[InstalledPlugin], list[
 # root -g / pnpm global; resolving them means spawning a package manager,
 # which drskill never does), PI_CODING_AGENT_DIR overrides (config.js:491;
 # the agent dir is fixed to <home>/.pi/agent, matching harnesses.toml), and
-# exotic hosted-git spellings pi accepts via hosted-git-info. Modeled:
-# object entries' per-resource `skills` filter (applyPackageFilter) and bare
-# top-level .md package skills (collectSkillEntries mode "pi").
+# exotic hosted-git spellings pi accepts via hosted-git-info.
 # Skills (collectPackageResources + readPiManifest): the package.json `pi`
-# manifest's skills entries win -- literal paths resolve against the
-# package root (verbatim, like pi's resolve(root, entry)), globs expand
-# with hidden segments filtered (expandPackageGlob), and entries starting
-# with !/+/- are override patterns that filter the discovered files
-# (applyPatterns). With NO `pi` manifest at all (missing/unparseable
-# package.json, or no pi key) the conventional skills/ dir loads; a pi
-# manifest without a valid skills field contributes nothing (readPiManifest
-# returns {}, truthy, so there is no fallback) -- except an object entry
-# with a skills filter, where collectManifestFiles falls back to the
-# conventional dir when the manifest has no usable entries.
+# manifest's skills entries resolve to skill files (globs expand, hidden
+# segments dropped); !/+/- entries filter them (applyPatterns) and an
+# object entry's `skills` filter narrows further (empty disables all).
+# Bare top-level .md files in a skill dir count as skills. With no `pi`
+# manifest the conventional skills/ dir loads; a manifest without a valid
+# skills field contributes nothing.
 # Precedence (package-manager.js resolve():707-712, dedupePackages): project
 # packages resolve FIRST so cwd resources win collisions; equal identities
 # (npm:<name> / git:<host>/<path> / local resolved path) dedupe with project
@@ -817,12 +811,8 @@ def _pi_skill_entries(
     root: Path, filter_patterns: list[str] | None
 ) -> tuple[list[Path], list[Path]]:
     """(skill dirs, bare skill files) a pi package contributes, applying
-    the package.json `pi.skills` manifest entries (with !/+/- overrides)
-    and, for object-form settings entries, the per-resource `skills`
-    filter (collectPackageResources / collectManifestFiles / applyPatterns).
-    A bare list means the conventional skills/ dir; a present `pi` manifest
-    without a valid skills field contributes nothing unless a filter forces
-    collectManifestFiles' convention fallback."""
+    the manifest's !/+/- overrides and an object entry's per-resource
+    `skills` filter (collectPackageResources / applyPatterns)."""
     data = _pi_read_json(root / "package.json", [])
     pi = data.get("pi") if isinstance(data, dict) else None
     if isinstance(pi, dict):

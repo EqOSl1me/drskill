@@ -76,8 +76,7 @@ def discover(
 ) -> tuple[list[RawInstance], list[BrokenSymlink], list[tuple[str, str]]]:
     instances: list[RawInstance] = []
     broken: list[BrokenSymlink] = []
-    # A harness may gate its project paths on a trust decision (pi's
-    # trust.json); when untrusted, pi never adds project dirs at all.
+    # Some harnesses (pi) gate project dirs on a project-trust file.
     project_trusted_here = True
     if h.project_trust_path:
         trust_path = home / h.project_trust_path.removeprefix("~/")
@@ -85,12 +84,8 @@ def discover(
     native_paths = h.search_paths(
         project_root, home, global_only, project_trusted=project_trusted_here
     )
-    # Store-delivered skills first, because their rank against the native
-    # paths is harness-specific: most keep plugin roots BELOW every native
-    # path (proven on gemini and copilot; codex keeps its no-shadowing
-    # semantics via search_order "none"). pi resolves packages first in
-    # time but resourcePrecedenceRank sorts them below every native dir, so
-    # it also takes the after-native default (hdm2).
+    # Store-delivered skills rank per plugin_order: most harnesses (gemini,
+    # copilot, pi) keep plugin roots below every native path.
     plugins, unreadable_states = discover_plugins(h.id, home, project_root)
     unreadable = [(h.id, p) for p in unreadable_states]
     usable = [
