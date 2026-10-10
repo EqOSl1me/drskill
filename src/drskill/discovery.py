@@ -77,7 +77,26 @@ def discover(
     instances: list[RawInstance] = []
     broken: list[BrokenSymlink] = []
     native_paths = h.search_paths(project_root, home, global_only)
-    for order, (base, scope, spec_str) in enumerate(native_paths):
+    # Store-delivered skills first, because their rank against the native
+    # paths is harness-specific: most keep plugin roots BELOW every native
+    # path (proven on gemini and copilot; codex keeps its no-shadowing
+    # semantics via search_order "none"), while pi resolves packages
+    # BEFORE native dirs with first-wins collision handling.
+    plugins, unreadable_states = discover_plugins(h.id, home, project_root)
+    unreadable = [(h.id, p) for p in unreadable_states]
+    usable = [
+        p for p in plugins
+        if p.enabled and not (global_only and p.scope == "project")
+    ]
+    if h.plugin_order == "before-native":
+        plugin_order_base = 0
+        native_order_base = sum(len(p.skills_roots) for p in usable)
+    else:
+        plugin_order_base = len(native_paths)
+        native_order_base = 0
+    for order, (base, scope, spec_str) in enumerate(
+        native_paths, start=native_order_base
+    ):
         if not base.is_dir():
             continue
         files = _find_skill_files(base, h.recursive)
@@ -120,17 +139,10 @@ def discover(
             )
         broken += [BrokenSymlink(harness=h.id, path=p)
                    for p in _find_broken_symlinks(base, recursive=True)]
-    # Store-delivered skills: enabled plugins' roots rank BELOW every
-    # native path (proven on gemini and copilot; codex keeps its
-    # no-shadowing semantics via search_order "none").
-    plugins, unreadable_states = discover_plugins(h.id, home, project_root)
-    unreadable = [(h.id, p) for p in unreadable_states]
-    order = len(native_paths)
-    for plug in plugins:
-        if not plug.enabled:
-            continue  # disabled plugins' skills demonstrably do not load
-        if global_only and plug.scope == "project":
-            continue
+    # Store-delivered skills: enabled plugins' roots rank per the harness's
+    # plugin_order, above or below every native path.
+    order = plugin_order_base
+    for plug in usable:
         for base in plug.skills_roots:
             if not base.is_dir():
                 order += 1

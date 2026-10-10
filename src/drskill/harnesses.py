@@ -21,6 +21,11 @@ class HarnessDef(BaseModel):
     # this); discovery enumerates in project-first order for determinism and
     # resolution skips shadow marking entirely.
     search_order: Literal["project-first", "global-first", "none"] = "project-first"
+    # Where store-delivered (plugin/package) skill roots rank against the
+    # native paths. "after-native" (gemini, copilot: proven) keeps plugin
+    # roots below every native path; "before-native" (pi: packages resolve
+    # ahead of native dirs and loadSkills is first-wins) puts them above.
+    plugin_order: Literal["after-native", "before-native"] = "after-native"
     recursive: bool = True
     root_md_paths: list[str] = Field(default_factory=list)
     # Slash-command file roots, scanned recursively for *.md; commands are

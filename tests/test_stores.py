@@ -593,6 +593,286 @@ def test_claude_code_multiple_bad_installs_single_unreadable(tmp_path):
     assert plugins == [] and unreadable == [str(p)]
 
 
+# --- pi packages (settings.json `packages` + package install store) -----
+# Semantics verified against pi 1.1.0 source (dist/core/package-manager.js,
+# pi-manifest.js, trust-manager.js, utils/git.js):
+#   * packages are declared in ~/.pi/agent/settings.json (user) and
+#     <cwd>/.pi/settings.json (project; only after project trust);
+#     entries are source strings or {source, autoload, ...} objects
+#   * git installs live at <agent>/git/<host>/<owner>/<repo> (ref dropped);
+#     npm at <agent>/npm/node_modules/<name> (project scope: <cwd>/.pi/...)
+#   * skills come from the package.json `pi.skills` entries (override
+#     patterns !/+/- are not roots; globs expand) -- OR the conventional
+#     skills/ dir, but only when there is no `pi` manifest at all
+#   * project packages resolve first and win identity dedupe
+#     (npm:<name> / git:<host>/<path> / local resolved path); a project
+#     entry with autoload:false is a delta that keeps the user copy
+
+def _pi_settings(home: Path, packages) -> Path:
+    agent = home / ".pi" / "agent"
+    agent.mkdir(parents=True, exist_ok=True)
+    p = agent / "settings.json"
+    p.write_text(json.dumps({"packages": packages}), encoding="utf-8")
+    return p
+
+
+def _pi_trust(home: Path, mapping: dict) -> Path:
+    agent = home / ".pi" / "agent"
+    agent.mkdir(parents=True, exist_ok=True)
+    p = agent / "trust.json"
+    p.write_text(json.dumps(mapping), encoding="utf-8")
+    return p
+
+
+def _pi_pkg(root: Path, *, name=None, version=None, pi=None, raw=None) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    if raw is not None or name is not None or version is not None or pi is not None:
+        m = dict(raw or {})
+        if name is not None:
+            m["name"] = name
+        if version is not None:
+            m["version"] = version
+        if pi is not None:
+            m["pi"] = pi
+        (root / "package.json").write_text(json.dumps(m), encoding="utf-8")
+    return root
+
+
+def test_pi_git_package_with_manifest_skills(tmp_path):
+    home, proj = tmp_path / "home", tmp_path / "proj"
+    proj.mkdir()
+    pkg = _pi_pkg(home / ".pi" / "agent" / "git" / "github.com" / "obra" / "superpowers",
+                  name="superpowers", version="7.0.0",
+                  pi={"skills": ["./skills"]})
+    _skill(pkg / "skills", "superpowers-skill")
+    settings = _pi_settings(home, ["git:github.com/obra/superpowers"])
+    plugins, unreadable = discover_plugins("pi", home, proj)
+    assert unreadable == []
+    (p,) = plugins
+    assert p.name == "superpowers" and p.version == "7.0.0"
+    assert p.scope == "user" and p.enabled and p.recursive
+    assert p.skills_roots == [pkg / "skills"]
+    assert p.provenance_source == "superpowers==7.0.0"
+    assert p.evidence == settings
+
+
+def test_pi_npm_scoped_package_conventional_skills_dir(tmp_path):
+    home, proj = tmp_path / "home", tmp_path / "proj"
+    proj.mkdir()
+    pkg = _pi_pkg(home / ".pi" / "agent" / "npm" / "node_modules" / "@lunaroute" / "pi-extension",
+                  name="@lunaroute/pi-extension", version="1.2.3")
+    _skill(pkg / "skills", "pi-extension-skill")
+    # @version must be stripped without mangling the @scope name
+    _pi_settings(home, ["npm:@lunaroute/pi-extension@1.2.3"])
+    plugins, unreadable = discover_plugins("pi", home, proj)
+    assert unreadable == []
+    (p,) = plugins
+    assert p.name == "@lunaroute/pi-extension" and p.version == "1.2.3"
+    assert p.scope == "user" and p.enabled
+    assert p.skills_roots == [pkg / "skills"]
+
+
+def test_pi_manifest_redirects_skills_and_patterns_are_not_roots(tmp_path):
+    home, proj = tmp_path / "home", tmp_path / "proj"
+    proj.mkdir()
+    pkg = _pi_pkg(home / ".pi" / "agent" / "git" / "github.com" / "obra" / "sp",
+                  name="sp", pi={"skills": ["./resources/skills", "!./skills/secret"]})
+    _skill(pkg / "resources" / "skills", "moved-skill")
+    _skill(pkg / "skills", "decoy-skill")  # conventional dir: NOT scanned
+    _pi_settings(home, ["git:github.com/obra/sp"])
+    plugins, _ = discover_plugins("pi", home, proj)
+    (p,) = plugins
+    assert p.skills_roots == [pkg / "resources" / "skills"]
+
+
+def test_pi_manifest_glob_entries_expand(tmp_path):
+    home, proj = tmp_path / "home", tmp_path / "proj"
+    proj.mkdir()
+    pkg = _pi_pkg(home / ".pi" / "agent" / "git" / "github.com" / "obra" / "sp",
+                  name="sp", pi={"skills": ["./packs/*/skills"]})
+    _skill(pkg / "packs" / "a" / "skills", "a-skill")
+    _skill(pkg / "packs" / "b" / "skills", "b-skill")
+    _pi_settings(home, ["git:github.com/obra/sp"])
+    plugins, _ = discover_plugins("pi", home, proj)
+    (p,) = plugins
+    assert p.skills_roots == [pkg / "packs" / "a" / "skills",
+                             pkg / "packs" / "b" / "skills"]
+
+
+def test_pi_manifest_without_skills_key_contributes_nothing(tmp_path):
+    home, proj = tmp_path / "home", tmp_path / "proj"
+    proj.mkdir()
+    pkg = _pi_pkg(home / ".pi" / "agent" / "git" / "github.com" / "obra" / "sp",
+                  name="sp", pi={"extensions": ["./.pi/extensions/sp.ts"]})
+    (pkg / ".pi" / "extensions").mkdir(parents=True)
+    _skill(pkg / "skills", "decoy-skill")  # pi manifest present: no fallback
+    _pi_settings(home, ["git:github.com/obra/sp"])
+    plugins, unreadable = discover_plugins("pi", home, proj)
+    assert plugins == [] and unreadable == []
+
+
+def test_pi_local_dir_package_and_local_file_entry(tmp_path):
+    home, proj = tmp_path / "home", tmp_path / "proj"
+    proj.mkdir()
+    pkg = _pi_pkg(home / ".pi" / "agent" / "local-pkg",
+                  name="local-pkg", version="0.1.0")
+    _skill(pkg / "skills", "local-skill")
+    ext = home / ".pi" / "agent" / "ext.ts"  # a file entry is an
+    ext.parent.mkdir(parents=True, exist_ok=True)  # extension, not a package
+    ext.write_text("// ext", encoding="utf-8")
+    _pi_settings(home, ["./local-pkg", "./ext.ts"])
+    plugins, unreadable = discover_plugins("pi", home, proj)
+    assert unreadable == []
+    (p,) = plugins
+    assert p.name == "local-pkg" and p.version == "0.1.0"
+    assert p.scope == "user" and p.skills_roots == [pkg / "skills"]
+
+
+def test_pi_dedupes_equivalent_sources_ignoring_ref(tmp_path):
+    home, proj = tmp_path / "home", tmp_path / "proj"
+    proj.mkdir()
+    pkg = _pi_pkg(home / ".pi" / "agent" / "git" / "github.com" / "obra" / "sp",
+                  name="sp", pi={"skills": ["./skills"]})
+    _skill(pkg / "skills", "sp-skill")
+    _pi_settings(home, ["git:github.com/obra/sp",
+                        "git:github.com/obra/sp@v7.0.0",  # ref drops from path
+                        "https://github.com/obra/sp"])      # same identity
+    plugins, unreadable = discover_plugins("pi", home, proj)
+    assert unreadable == []
+    assert len(plugins) == 1
+    assert plugins[0].skills_roots == [pkg / "skills"]
+
+
+def test_pi_project_packages_require_trust(tmp_path):
+    home = tmp_path / "home"
+    work = tmp_path / "work"
+    proj = work / "repo"
+    proj.mkdir(parents=True)
+    pkg = _pi_pkg(proj / ".pi" / "git" / "github.com" / "obra" / "sp",
+                  name="sp", pi={"skills": ["./skills"]})
+    _skill(pkg / "skills", "sp-skill")
+    (proj / ".pi" / "settings.json").write_text(
+        json.dumps({"packages": ["git:github.com/obra/sp"]}), encoding="utf-8")
+    # no trust.json: project packages do not load; user packages still do
+    user_pkg = _pi_pkg(home / ".pi" / "agent" / "git" / "github.com" / "obra" / "up",
+                       name="up", pi={"skills": ["./skills"]})
+    _skill(user_pkg / "skills", "up-skill")
+    _pi_settings(home, ["git:github.com/obra/up"])
+    plugins, unreadable = discover_plugins("pi", home, proj)
+    assert unreadable == []
+    assert [(p.name, p.scope) for p in plugins] == [("up", "user")]
+    # ancestor trust covers the project dir
+    _pi_trust(home, {str(work.resolve()): True})
+    plugins, unreadable = discover_plugins("pi", home, proj)
+    assert unreadable == []
+    by_name = {p.name: p for p in plugins}
+    assert by_name["sp"].scope == "project"
+    assert by_name["sp"].project_path == proj
+    # an explicit false decision blocks (nearest ancestor entry wins)
+    _pi_trust(home, {str(work.resolve()): False})
+    plugins, _ = discover_plugins("pi", home, proj)
+    assert [(p.name, p.scope) for p in plugins] == [("up", "user")]
+
+
+def test_pi_project_wins_identity_and_delta_keeps_both(tmp_path):
+    home = tmp_path / "home"
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    _pi_trust(home, {str(proj.resolve()): True})
+    for base, tag in ((home / ".pi" / "agent" / "git" / "github.com" / "obra" / "sp", "u"),
+                      (proj / ".pi" / "git" / "github.com" / "obra" / "sp", "p")):
+        _pi_pkg(base, name="sp", pi={"skills": ["./skills"]})
+        _skill(base / "skills", f"{tag}-skill")
+    _pi_settings(home, ["git:github.com/obra/sp"])
+    (proj / ".pi" / "settings.json").write_text(
+        json.dumps({"packages": ["git:github.com/obra/sp"]}), encoding="utf-8")
+    plugins, _ = discover_plugins("pi", home, proj)
+    # same identity: the project checkout wins outright
+    assert [(p.name, p.scope) for p in plugins] == [("sp", "project")]
+    # project entry with autoload=false is a delta over the user copy
+    (proj / ".pi" / "settings.json").write_text(
+        json.dumps({"packages": [{"source": "git:github.com/obra/sp",
+                                  "autoload": False}]}), encoding="utf-8")
+    plugins, _ = discover_plugins("pi", home, proj)
+    assert [(p.name, p.scope, p.enabled) for p in plugins] == [
+        ("sp", "project", False), ("sp", "user", True)
+    ]
+
+
+def test_pi_declared_but_uninstalled_packages_are_skipped(tmp_path):
+    home, proj = tmp_path / "home", tmp_path / "proj"
+    proj.mkdir()
+    _pi_settings(home, ["git:github.com/obra/gone", "npm:@gone/pkg", "./missing"])
+    plugins, unreadable = discover_plugins("pi", home, proj)
+    assert plugins == [] and unreadable == []
+
+
+def test_pi_corrupt_package_json_falls_back_to_convention(tmp_path):
+    home, proj = tmp_path / "home", tmp_path / "proj"
+    proj.mkdir()
+    pkg = home / ".pi" / "agent" / "git" / "github.com" / "obra" / "sp"
+    _skill(pkg / "skills", "conv-skill")
+    (pkg / "package.json").write_text("{bad json", encoding="utf-8")
+    _pi_settings(home, ["git:github.com/obra/sp"])
+    plugins, unreadable = discover_plugins("pi", home, proj)
+    assert unreadable == []
+    (p,) = plugins
+    # identity falls back to the checkout name when package.json is unreadable
+    assert p.name == "sp" and p.version is None
+    assert p.skills_roots == [pkg / "skills"]
+
+
+def test_pi_settings_invalid_json_is_unreadable(tmp_path):
+    home, proj = tmp_path / "home", tmp_path / "proj"
+    proj.mkdir()
+    agent = home / ".pi" / "agent"
+    agent.mkdir(parents=True)
+    p = agent / "settings.json"
+    p.write_text("{nope", encoding="utf-8")
+    plugins, unreadable = discover_plugins("pi", home, proj)
+    assert plugins == [] and unreadable == [str(p)]
+
+
+def test_pi_settings_wrong_shape_and_bad_packages_are_unreadable(tmp_path):
+    home, proj = tmp_path / "home", tmp_path / "proj"
+    proj.mkdir()
+    agent = home / ".pi" / "agent"
+    agent.mkdir(parents=True)
+    for content in ("[]", json.dumps({"packages": "not-a-list"}),
+                    json.dumps({"packages": [123]}),
+                    json.dumps({"packages": [{"autoload": True}]})):
+        p = agent / "settings.json"
+        p.write_text(content, encoding="utf-8")
+        plugins, unreadable = discover_plugins("pi", home, proj)
+        assert plugins == [] and unreadable == [str(p)], content
+
+
+def test_pi_settings_without_packages_key_is_normal(tmp_path):
+    home, proj = tmp_path / "home", tmp_path / "proj"
+    proj.mkdir()
+    agent = home / ".pi" / "agent"
+    agent.mkdir(parents=True)
+    (agent / "settings.json").write_text(
+        json.dumps({"lastChangelogVersion": "1.1.0"}), encoding="utf-8")
+    plugins, unreadable = discover_plugins("pi", home, proj)
+    assert plugins == [] and unreadable == []
+
+
+def test_pi_corrupt_trust_file_is_unreadable_and_blocks_project(tmp_path):
+    home = tmp_path / "home"
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    pkg = _pi_pkg(proj / ".pi" / "git" / "github.com" / "obra" / "sp",
+                  name="sp", pi={"skills": ["./skills"]})
+    _skill(pkg / "skills", "sp-skill")
+    (proj / ".pi" / "settings.json").write_text(
+        json.dumps({"packages": ["git:github.com/obra/sp"]}), encoding="utf-8")
+    trust = _pi_trust(home, {})  # placeholder dir; corrupt it below
+    trust.write_text("{broken", encoding="utf-8")
+    plugins, unreadable = discover_plugins("pi", home, proj)
+    assert plugins == [] and unreadable == [str(trust)]
+
+
 def test_copilot_multiple_bad_cache_paths_single_unreadable(tmp_path):
     home, proj = tmp_path / "home", tmp_path / "proj"
     proj.mkdir()
