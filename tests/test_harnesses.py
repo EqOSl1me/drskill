@@ -13,9 +13,13 @@ def test_loads_verified_core():
     assert pi.paths_verified and pi.precedence_verified
 
 
-def test_pi_rules_match_docs():
+def test_pi_rules_match_source():
+    # pi 1.1.0 source: addAutoDiscoveredResources() adds the project dirs to
+    # the accumulator before the user dirs, and toResolvedPaths() sorts by
+    # resourcePrecedenceRank (project auto=1 < user auto=3), so skillPaths
+    # reach loadSkills project-first; loadSkills is first-wins on name.
     pi = get(load_harnesses(), "pi")
-    assert pi.search_order == "global-first"
+    assert pi.search_order == "project-first"
     assert pi.project_paths == [".pi/skills", ".agents/skills"]
     assert pi.global_paths == ["~/.pi/agent/skills", "~/.agents/skills"]
     assert set(pi.root_md_paths) == {".pi/skills", "~/.pi/agent/skills"}
@@ -61,11 +65,11 @@ def test_opencode_rules_match_probes():
 def test_search_paths_order_and_scope(tmp_path):
     pi = get(load_harnesses(), "pi")
     triples = pi.search_paths(tmp_path / "proj", tmp_path / "home")
-    # global-first: the two global paths come before the two project paths
-    assert [t[1] for t in triples] == ["user", "user", "project", "project"]
-    assert triples[0][0] == tmp_path / "home" / ".pi/agent/skills"
-    assert triples[2][0] == tmp_path / "proj" / ".pi/skills"
-    assert triples[2][2] == ".pi/skills"
+    # project-first: the two project paths come before the two global paths
+    assert [t[1] for t in triples] == ["project", "project", "user", "user"]
+    assert triples[0][0] == tmp_path / "proj" / ".pi/skills"
+    assert triples[0][2] == ".pi/skills"
+    assert triples[2][0] == tmp_path / "home" / ".pi/agent/skills"
 
 
 def test_global_only_drops_project_paths(tmp_path):

@@ -84,22 +84,22 @@ def test_no_double_load_when_shadowed(tmp_path):
 
 
 def test_name_shadow_conflicting_winners_stay_distinct(tmp_path):
-    # pi is global-first, gemini-cli is project-first; both read .agents/skills
-    # (project) and ~/.agents/skills (user). The two harnesses disagree on
-    # which copy wins, so merging their findings into one (as a
+    # cline is global-first, gemini-cli is project-first; both read
+    # .agents/skills (project) and ~/.agents/skills (user). The two harnesses
+    # disagree on which copy wins, so merging their findings into one (as a
     # content-hash-only fingerprint would) would report the wrong winner for
     # whichever harness lost the merge.
     proj, home = tmp_path / "p", tmp_path / "h"
     write(proj, ".agents/skills", "tool", body="project version")
     write(home, ".agents/skills", "tool", body="user version")
-    findings = run_all(world_from(proj, home, ("pi", "gemini-cli")), Config())
+    findings = run_all(world_from(proj, home, ("cline", "gemini-cli")), Config())
     shadows = find(findings, "name-shadow")
     assert len(shadows) == 2
-    pi_finding = next(f for f in shadows if "pi" in f.harnesses)
+    cline_finding = next(f for f in shadows if "cline" in f.harnesses)
     gemini_finding = next(f for f in shadows if "gemini-cli" in f.harnesses)
-    assert pi_finding.fingerprint != gemini_finding.fingerprint
-    # pi: global-first -> the user/global copy wins
-    assert "user" in pi_finding.message
+    assert cline_finding.fingerprint != gemini_finding.fingerprint
+    # cline: global-first -> the user/global copy wins
+    assert "user" in cline_finding.message
     # gemini-cli: project-first -> the project copy wins
     assert "project" in gemini_finding.message
 

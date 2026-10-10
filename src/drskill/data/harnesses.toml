@@ -36,9 +36,16 @@ mcp_format = "mcp-json"
 mcp_format_global = "claude-user-json"
 mcp_verified = true
 
-# Verified against pi docs (packages/coding-agent/docs/skills.md):
-# global paths load first and first-found wins; bare .md files count as
-# skills only in the two pi-native directories.
+# Verified against pi source 1.1.0: addAutoDiscoveredResources() adds the
+# project dirs (.pi/skills, then ancestor-walked .agents/skills) to the
+# accumulator before the user dirs (~/.pi/agent/skills, then ~/.agents/
+# skills), and toResolvedPaths() sorts skill paths by
+# resourcePrecedenceRank (project auto=1 < user auto=3); loadSkills is
+# first-wins on a name collision (skills.js:326-346), so the project copy
+# shadows the user copy. (The bundled skills.md only says "Name collisions
+# keep the first discovered skill", which is consistent once the scan order
+# is read from source.) Bare .md files count as skills only in the two
+# pi-native directories.
 # Store packages: pi's package-manager resolve() processes packages
 # BEFORE every native dir and loadSkills keeps the first same-name skill
 # (skills.js:326-346), so package skill roots rank ABOVE native paths
@@ -52,7 +59,7 @@ precedence_verified = true
 detect = [".pi", "~/.pi"]
 project_paths = [".pi/skills", ".agents/skills"]
 global_paths = ["~/.pi/agent/skills", "~/.agents/skills"]
-search_order = "global-first"
+search_order = "project-first"
 plugin_order = "before-native"
 recursive = true
 root_md_paths = [".pi/skills", "~/.pi/agent/skills"]
