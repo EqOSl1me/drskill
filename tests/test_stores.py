@@ -651,7 +651,7 @@ def test_pi_git_package_with_manifest_skills(tmp_path):
     (p,) = plugins
     assert p.name == "superpowers" and p.version == "7.0.0"
     assert p.scope == "user" and p.enabled and p.recursive
-    assert p.skills_roots == [pkg / "skills"]
+    assert p.skills_roots == [pkg / "skills" / "superpowers-skill"]
     assert p.provenance_source == "superpowers==7.0.0"
     assert p.evidence == settings
 
@@ -669,7 +669,7 @@ def test_pi_npm_scoped_package_conventional_skills_dir(tmp_path):
     (p,) = plugins
     assert p.name == "@lunaroute/pi-extension" and p.version == "1.2.3"
     assert p.scope == "user" and p.enabled
-    assert p.skills_roots == [pkg / "skills"]
+    assert p.skills_roots == [pkg / "skills" / "pi-extension-skill"]
 
 
 def test_pi_manifest_redirects_skills_and_patterns_are_not_roots(tmp_path):
@@ -682,7 +682,7 @@ def test_pi_manifest_redirects_skills_and_patterns_are_not_roots(tmp_path):
     _pi_settings(home, ["git:github.com/obra/sp"])
     plugins, _ = discover_plugins("pi", home, proj)
     (p,) = plugins
-    assert p.skills_roots == [pkg / "resources" / "skills"]
+    assert p.skills_roots == [pkg / "resources" / "skills" / "moved-skill"]
 
 
 def test_pi_manifest_glob_entries_expand(tmp_path):
@@ -695,8 +695,91 @@ def test_pi_manifest_glob_entries_expand(tmp_path):
     _pi_settings(home, ["git:github.com/obra/sp"])
     plugins, _ = discover_plugins("pi", home, proj)
     (p,) = plugins
-    assert p.skills_roots == [pkg / "packs" / "a" / "skills",
-                             pkg / "packs" / "b" / "skills"]
+    assert p.skills_roots == [pkg / "packs" / "a" / "skills" / "a-skill",
+                             pkg / "packs" / "b" / "skills" / "b-skill"]
+
+
+def test_pi_manifest_exclusion_pattern_filters_skills(tmp_path):
+    # manifest override patterns (!/+/-, applyPatterns) filter the discovered
+    # files; they are not roots and are not silently ignored.
+    home, proj = tmp_path / "home", tmp_path / "proj"
+    proj.mkdir()
+    pkg = _pi_pkg(home / ".pi" / "agent" / "git" / "github.com" / "obra" / "sp",
+                  name="sp", pi={"skills": ["./skills", "!./skills/secret"]})
+    _skill(pkg / "skills", "keep")
+    _skill(pkg / "skills", "secret")
+    _pi_settings(home, ["git:github.com/obra/sp"])
+    plugins, unreadable = discover_plugins("pi", home, proj)
+    assert unreadable == []
+    (p,) = plugins
+    assert p.skills_roots == [pkg / "skills" / "keep"]
+
+
+def test_pi_object_entry_skills_filter_narrows(tmp_path):
+    # object-form package entries carry a per-resource skills filter that pi
+    # applies on top of the manifest set (applyPackageFilter).
+    home, proj = tmp_path / "home", tmp_path / "proj"
+    proj.mkdir()
+    pkg = _pi_pkg(home / ".pi" / "agent" / "git" / "github.com" / "obra" / "sp",
+                  name="sp", pi={"skills": ["./skills"]})
+    _skill(pkg / "skills", "keep")
+    _skill(pkg / "skills", "drop")
+    _pi_settings(home, [{"source": "git:github.com/obra/sp",
+                         "skills": ["./skills/keep"]}])
+    plugins, unreadable = discover_plugins("pi", home, proj)
+    assert unreadable == []
+    (p,) = plugins
+    assert p.skills_roots == [pkg / "skills" / "keep"]
+
+
+def test_pi_object_entry_empty_skills_filter_disables_all(tmp_path):
+    # an empty skills array explicitly disables every skill of that package
+    home, proj = tmp_path / "home", tmp_path / "proj"
+    proj.mkdir()
+    pkg = _pi_pkg(home / ".pi" / "agent" / "git" / "github.com" / "obra" / "sp",
+                  name="sp", pi={"skills": ["./skills"]})
+    _skill(pkg / "skills", "keep")
+    _pi_settings(home, [{"source": "git:github.com/obra/sp", "skills": []}])
+    plugins, unreadable = discover_plugins("pi", home, proj)
+    assert plugins == [] and unreadable == []
+
+
+def test_pi_conventional_package_top_level_markdown_skill(tmp_path):
+    # collectSkillEntries(dir, "pi") counts bare top-level .md files in a
+    # skill root as skills, not just SKILL.md dirs.
+    home, proj = tmp_path / "home", tmp_path / "proj"
+    proj.mkdir()
+    pkg = _pi_pkg(home / ".pi" / "agent" / "git" / "github.com" / "obra" / "sp",
+                  name="sp")
+    skills = pkg / "skills"
+    skills.mkdir(parents=True)
+    (skills / "review.md").write_text(
+        "---\nname: review\ndescription: d\n---\nbody\n", encoding="utf-8"
+    )
+    _pi_settings(home, ["git:github.com/obra/sp"])
+    plugins, unreadable = discover_plugins("pi", home, proj)
+    assert unreadable == []
+    (p,) = plugins
+    assert p.skills_roots == []
+    assert p.skill_files == [skills / "review.md"]
+
+
+def test_pi_manifest_root_mixes_skill_dir_and_markdown(tmp_path):
+    home, proj = tmp_path / "home", tmp_path / "proj"
+    proj.mkdir()
+    pkg = _pi_pkg(home / ".pi" / "agent" / "git" / "github.com" / "obra" / "sp",
+                  name="sp", pi={"skills": ["./skills"]})
+    skills = pkg / "skills"
+    _skill(skills, "keep")
+    (skills / "review.md").write_text(
+        "---\nname: review\ndescription: d\n---\nbody\n", encoding="utf-8"
+    )
+    _pi_settings(home, ["git:github.com/obra/sp"])
+    plugins, unreadable = discover_plugins("pi", home, proj)
+    assert unreadable == []
+    (p,) = plugins
+    assert p.skills_roots == [skills / "keep"]
+    assert p.skill_files == [skills / "review.md"]
 
 
 def test_pi_manifest_without_skills_key_contributes_nothing(tmp_path):
@@ -725,7 +808,7 @@ def test_pi_local_dir_package_and_local_file_entry(tmp_path):
     assert unreadable == []
     (p,) = plugins
     assert p.name == "local-pkg" and p.version == "0.1.0"
-    assert p.scope == "user" and p.skills_roots == [pkg / "skills"]
+    assert p.scope == "user" and p.skills_roots == [pkg / "skills" / "local-skill"]
 
 
 def test_pi_dedupes_equivalent_sources_ignoring_ref(tmp_path):
@@ -740,7 +823,7 @@ def test_pi_dedupes_equivalent_sources_ignoring_ref(tmp_path):
     plugins, unreadable = discover_plugins("pi", home, proj)
     assert unreadable == []
     assert len(plugins) == 1
-    assert plugins[0].skills_roots == [pkg / "skills"]
+    assert plugins[0].skills_roots == [pkg / "skills" / "sp-skill"]
 
 
 def test_pi_nested_git_repository_path(tmp_path):
@@ -758,7 +841,7 @@ def test_pi_nested_git_repository_path(tmp_path):
     assert unreadable == []
     (p,) = plugins
     assert p.name == "pkg"
-    assert p.skills_roots == [pkg / "skills"]
+    assert p.skills_roots == [pkg / "skills" / "nested-skill"]
 
 
 def test_pi_git_repo_path_traversal_is_rejected(tmp_path):
@@ -851,7 +934,7 @@ def test_pi_corrupt_package_json_falls_back_to_convention(tmp_path):
     (p,) = plugins
     # identity falls back to the checkout name when package.json is unreadable
     assert p.name == "sp" and p.version is None
-    assert p.skills_roots == [pkg / "skills"]
+    assert p.skills_roots == [pkg / "skills" / "conv-skill"]
 
 
 def test_pi_settings_invalid_json_is_unreadable(tmp_path):

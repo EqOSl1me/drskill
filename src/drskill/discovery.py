@@ -172,4 +172,18 @@ def discover(
                 for p in _find_broken_symlinks(base, plug.recursive)
             ]
             order += 1
+        for f in plug.skill_files:
+            if not f.exists():
+                broken.append(BrokenSymlink(harness=h.id, path=f))
+                order += 1
+                continue
+            instances.append(RawInstance(
+                harness=h.id,
+                scope=plug.scope,
+                skill_file=f,
+                via_symlink=False,
+                order=order,
+                plugin=plug,
+            ))
+            order += 1
     return instances, broken, unreadable

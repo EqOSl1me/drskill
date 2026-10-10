@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import re
 import tomllib
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Callable, Literal
 from urllib.parse import unquote, urlparse
@@ -36,6 +37,9 @@ class InstalledPlugin(BaseModel):
     scope: Literal["user", "project"] = "user"
     project_path: Path | None = None
     skills_roots: list[Path] = Field(default_factory=list)
+    # Explicit skill files a store contributes (pi package skill dirs may
+    # hold bare top-level .md skills alongside SKILL.md dirs).
+    skill_files: list[Path] = Field(default_factory=list)
     enabled: bool = True
     recursive: bool = True
     evidence: Path
@@ -449,18 +453,21 @@ def _droid(home: Path, project_root: Path) -> tuple[list[InstalledPlugin], list[
 # NOT modeled (skipped, never guessed): legacy global-npm installs (npm
 # root -g / pnpm global; resolving them means spawning a package manager,
 # which drskill never does), PI_CODING_AGENT_DIR overrides (config.js:491;
-# the agent dir is fixed to <home>/.pi/agent, matching harnesses.toml),
-# per-resource pattern filters ({source, skills: [patterns]}) and
-# standalone .md file entries (InstalledPlugin carries skill directories
-# only), and exotic hosted-git spellings pi accepts via hosted-git-info.
+# the agent dir is fixed to <home>/.pi/agent, matching harnesses.toml), and
+# exotic hosted-git spellings pi accepts via hosted-git-info. Modeled:
+# object entries' per-resource `skills` filter (applyPackageFilter) and bare
+# top-level .md package skills (collectSkillEntries mode "pi").
 # Skills (collectPackageResources + readPiManifest): the package.json `pi`
 # manifest's skills entries win -- literal paths resolve against the
 # package root (verbatim, like pi's resolve(root, entry)), globs expand
 # with hidden segments filtered (expandPackageGlob), and entries starting
-# with !/+/- are override patterns, not roots. With NO `pi` manifest at
-# all (missing/unparseable package.json, or no pi key) the conventional
-# skills/ dir loads; a pi manifest without a valid skills field contributes
-# nothing (readPiManifest returns {}, truthy, so there is no fallback).
+# with !/+/- are override patterns that filter the discovered files
+# (applyPatterns). With NO `pi` manifest at all (missing/unparseable
+# package.json, or no pi key) the conventional skills/ dir loads; a pi
+# manifest without a valid skills field contributes nothing (readPiManifest
+# returns {}, truthy, so there is no fallback) -- except an object entry
+# with a skills filter, where collectManifestFiles falls back to the
+# conventional dir when the manifest has no usable entries.
 # Precedence (package-manager.js resolve():707-712, dedupePackages): project
 # packages resolve FIRST so cwd resources win collisions; equal identities
 # (npm:<name> / git:<host>/<path> / local resolved path) dedupe with project
@@ -562,10 +569,14 @@ def _pi_parse_git(source: str) -> tuple[str, str] | None:
     return host, path
 
 
-def _pi_read_settings(path: Path, unreadable: list[str]) -> list[tuple[str, bool]] | None:
-    """Declarations from a settings.json: (source, enabled) tuples; None
-    when the file exists but cannot be honored (surfaced as unreadable,
-    matching the claude-code adapter's whole-file contract)."""
+def _pi_read_settings(
+    path: Path, unreadable: list[str]
+) -> list[tuple[str, bool, list[str] | None]] | None:
+    """Declarations from a settings.json: (source, enabled, skills_filter)
+    tuples; skills_filter is the object entry's per-resource `skills`
+    pattern list, or None when absent. None (the whole result) when the
+    file exists but cannot be honored (surfaced as unreadable, matching the
+    claude-code adapter's whole-file contract)."""
     if not path.is_file():
         return []
     data = _pi_read_json(path, unreadable)
@@ -580,12 +591,20 @@ def _pi_read_settings(path: Path, unreadable: list[str]) -> list[tuple[str, bool
     if not isinstance(pkgs, list):
         _pi_unreadable(path, unreadable)
         return None
-    out: list[tuple[str, bool]] = []
+    out: list[tuple[str, bool, list[str] | None]] = []
     for entry in pkgs:
         if isinstance(entry, str):
-            out.append((entry, True))
+            out.append((entry, True, None))
         elif isinstance(entry, dict) and isinstance(entry.get("source"), str):
-            out.append((entry["source"], entry.get("autoload") is not False))
+            skills = entry.get("skills")
+            if skills is None:
+                flt: list[str] | None = None
+            elif isinstance(skills, list) and all(isinstance(s, str) for s in skills):
+                flt = skills
+            else:
+                _pi_unreadable(path, unreadable)
+                return None
+            out.append((entry["source"], entry.get("autoload") is not False, flt))
         else:
             _pi_unreadable(path, unreadable)
             return None
@@ -646,44 +665,204 @@ def _pi_install_root(source: str, scope: str, agent: Path, proj_pi: Path):
     return p, p.name
 
 
-def _pi_skills_roots(root: Path) -> list[Path]:
-    """Skill dirs a package contributes, per collectPackageResources:
-    pi-manifest skills entries when a `pi` manifest exists, else the
-    conventional skills/ dir."""
-    data = _pi_read_json(root / "package.json", [])
-    pi = data.get("pi") if isinstance(data, dict) else None
-    if not isinstance(pi, dict):
-        conv = root / "skills"
-        return [conv] if conv.is_dir() else []
-    entries = pi.get("skills")
-    if not (isinstance(entries, list)
-            and all(isinstance(e, str) for e in entries)):
-        return []  # manifest exists but no valid skills field: no fallback
-    roots: list[Path] = []
+def _pi_collect_skill_files(path: Path) -> list[Path]:
+    """Files pi's collectFilesFromPaths(path, "skills") yields: an existing
+    file is taken verbatim, a directory is enumerated like
+    collectSkillEntries(dir, "pi")."""
+    if path.is_file():
+        return [path]
+    if not path.is_dir():
+        return []
+    return _pi_collect_skill_entries(path, path)
+
+
+def _pi_collect_skill_entries(directory: Path, root: Path) -> list[Path]:
+    """Mirror collectSkillEntries(dir, mode="pi"): a directory holding
+    SKILL.md contributes just that file; otherwise bare top-level .md files
+    count (only at the original root) and subdirectories recurse."""
+    if (directory / "SKILL.md").is_file():
+        return [directory / "SKILL.md"]
+    out: list[Path] = []
+    try:
+        entries = sorted(directory.iterdir(), key=lambda p: p.name)
+    except OSError:
+        return []
+    for entry in entries:
+        if entry.name.startswith(".") or entry.name == "node_modules":
+            continue
+        if entry.is_file() and entry.name.endswith(".md") and directory == root:
+            out.append(entry)
+        elif entry.is_dir():
+            out.extend(_pi_collect_skill_entries(entry, root))
+    return out
+
+
+def _pi_manifest_skill_files(root: Path, entries: list[str]) -> list[Path]:
+    """collectFilesFromManifestEntries: resolve source entries (globs
+    expand with hidden segments dropped) to skill files; !/+/- entries are
+    override patterns, not sources."""
+    files: list[Path] = []
     for e in entries:
         if e.startswith(("!", "+", "-")):
-            continue  # override patterns filter files; not roots
+            continue
         if "*" in e or "?" in e:
-            for m in sorted(root.glob(e.removeprefix("./"))):
+            pattern = e[2:] if e.startswith("./") else e
+            for m in sorted(root.glob(pattern)):
                 try:
                     rel = m.relative_to(root)
                 except ValueError:
                     continue
                 if any(p != ".." and p.startswith(".") for p in rel.parts):
                     continue  # expandPackageGlob drops hidden segments
-                if m.is_dir():
-                    roots.append(m)
+                files.extend(_pi_collect_skill_files(m))
         else:
-            p = root / e  # resolved verbatim, like pi's resolve(root, entry)
-            if p.is_dir():
-                roots.append(p)
+            files.extend(_pi_collect_skill_files(root / e))
+    return _dedupe_paths(files)
+
+
+def _dedupe_paths(paths: list[Path]) -> list[Path]:
     out: list[Path] = []
     seen: set[str] = set()
-    for r in roots:
-        if str(r) not in seen:
-            seen.add(str(r))
-            out.append(r)
+    for p in paths:
+        if str(p) not in seen:
+            seen.add(str(p))
+            out.append(p)
     return out
+
+
+def _pi_norm_pattern(pattern: str) -> str:
+    p = pattern.replace("\\", "/")
+    return p[2:] if p.startswith("./") else p
+
+
+def _pi_matches_pattern(file: Path, pattern: str, base: Path) -> bool:
+    """matchesAnyPattern: glob against the path relative to base, the
+    basename, the absolute posix path, and (for SKILL.md) the parent dir."""
+    pat = _pi_norm_pattern(pattern)
+    try:
+        rel = file.relative_to(base).as_posix()
+    except ValueError:
+        rel = file.as_posix()
+    candidates = [rel, file.name, file.as_posix()]
+    if file.name == "SKILL.md":
+        parent = file.parent
+        try:
+            parent_rel = parent.relative_to(base).as_posix()
+        except ValueError:
+            parent_rel = parent.as_posix()
+        candidates += [parent_rel, parent.name, parent.as_posix()]
+    return any(fnmatchcase(c, pat) for c in candidates)
+
+
+def _pi_matches_exact(file: Path, pattern: str, base: Path) -> bool:
+    """matchesAnyExactPattern: exact rel/abs match, plus the SKILL.md
+    parent dir, with a leading ./ stripped."""
+    pat = _pi_norm_pattern(pattern)
+    try:
+        rel = file.relative_to(base).as_posix()
+    except ValueError:
+        rel = file.as_posix()
+    if pat == rel or pat == file.as_posix():
+        return True
+    if file.name == "SKILL.md":
+        parent = file.parent
+        try:
+            parent_rel = parent.relative_to(base).as_posix()
+        except ValueError:
+            parent_rel = parent.as_posix()
+        if pat == parent_rel or pat == parent.as_posix():
+            return True
+    return False
+
+
+def _pi_apply_patterns(files: list[Path], patterns: list[str], base: Path) -> list[Path]:
+    """applyPatterns: plain includes narrow the set (or all when none),
+    ! excludes, + force-includes exact paths, - force-excludes exact
+    paths."""
+    includes: list[str] = []
+    excludes: list[str] = []
+    force_includes: list[str] = []
+    force_excludes: list[str] = []
+    for p in patterns:
+        if p.startswith("+"):
+            force_includes.append(p[1:])
+        elif p.startswith("-"):
+            force_excludes.append(p[1:])
+        elif p.startswith("!"):
+            excludes.append(p[1:])
+        else:
+            includes.append(p)
+    result = (
+        [f for f in files if any(_pi_matches_pattern(f, p, base) for p in includes)]
+        if includes else list(files)
+    )
+    if excludes:
+        result = [
+            f for f in result
+            if not any(_pi_matches_pattern(f, p, base) for p in excludes)
+        ]
+    if force_includes:
+        for f in files:
+            if f not in result and any(_pi_matches_exact(f, p, base) for p in force_includes):
+                result.append(f)
+    if force_excludes:
+        result = [
+            f for f in result
+            if not any(_pi_matches_exact(f, p, base) for p in force_excludes)
+        ]
+    return result
+
+
+def _pi_skill_entries(
+    root: Path, filter_patterns: list[str] | None
+) -> tuple[list[Path], list[Path]]:
+    """(skill dirs, bare skill files) a pi package contributes, applying
+    the package.json `pi.skills` manifest entries (with !/+/- overrides)
+    and, for object-form settings entries, the per-resource `skills`
+    filter (collectPackageResources / collectManifestFiles / applyPatterns).
+    A bare list means the conventional skills/ dir; a present `pi` manifest
+    without a valid skills field contributes nothing unless a filter forces
+    collectManifestFiles' convention fallback."""
+    data = _pi_read_json(root / "package.json", [])
+    pi = data.get("pi") if isinstance(data, dict) else None
+    if isinstance(pi, dict):
+        raw = pi.get("skills")
+        manifest_skills = (
+            raw if isinstance(raw, list) and all(isinstance(e, str) for e in raw)
+            else None
+        )
+    else:
+        manifest_skills = None
+    # collectManifestFiles falls back to the conventional dir when an
+    # object-entry filter is present but the manifest has no usable skills
+    # entries; without a filter, a present `pi` manifest contributes only
+    # its skills field (no convention fallback).
+    if not isinstance(pi, dict):
+        use_convention = True  # no pi manifest at all
+    elif manifest_skills is None:
+        use_convention = False  # pi manifest without valid skills: no fallback
+    else:
+        use_convention = filter_patterns is not None and len(manifest_skills) == 0
+    if use_convention:
+        conv = root / "skills"
+        enabled = _pi_collect_skill_entries(conv, conv) if conv.is_dir() else []
+    else:
+        source_files = _pi_manifest_skill_files(root, manifest_skills or [])
+        overrides = [e for e in (manifest_skills or []) if e.startswith(("!", "+", "-"))]
+        enabled = _pi_apply_patterns(source_files, overrides, root) if overrides else source_files
+    if filter_patterns is not None:
+        enabled = (
+            [] if len(filter_patterns) == 0
+            else _pi_apply_patterns(enabled, filter_patterns, root)
+        )
+    dirs: list[Path] = []
+    files: list[Path] = []
+    for f in enabled:
+        if f.name == "SKILL.md":
+            dirs.append(f.parent)
+        else:
+            files.append(f)
+    return _dedupe_paths(dirs), _dedupe_paths(files)
 
 
 def _pi_pkg_fields(root: Path, fallback_name: str) -> tuple[str, str | None]:
@@ -711,31 +890,31 @@ def _pi(home: Path, project_root: Path) -> tuple[list[InstalledPlugin], list[str
     if project_trusted(agent / "trust.json", project_root, unreadable):
         project_entries = _pi_read_settings(proj_path, unreadable) or []
     # project first so cwd resources win collisions; dedupe by identity
-    ordered = [("project", s, en, proj_path) for s, en in project_entries]
-    ordered += [("user", s, en, user_path) for s, en in user_entries or []]
-    result: list[tuple[str, str, bool, Path]] = []
+    ordered = [("project", s, en, flt, proj_path) for s, en, flt in project_entries]
+    ordered += [("user", s, en, flt, user_path) for s, en, flt in user_entries or []]
+    result: list[tuple[str, str, bool, list[str] | None, Path]] = []
     seen: dict[str, int] = {}
-    for scope, source, enabled, evidence in ordered:
+    for scope, source, enabled, flt, evidence in ordered:
         ident = _pi_identity(source, scope, agent, proj_pi)
         if ident is None:
             continue
         idx = seen.get(ident)
         if idx is None:
             seen[ident] = len(result)
-            result.append((scope, source, enabled, evidence))
+            result.append((scope, source, enabled, flt, evidence))
         elif result[idx][0] == "project" and scope == "user":
             if result[idx][2] is False:  # project autoload:false delta keeps both
-                result.append((scope, source, enabled, evidence))
+                result.append((scope, source, enabled, flt, evidence))
         elif scope == "project":
-            result[idx] = (scope, source, enabled, evidence)  # project wins
+            result[idx] = (scope, source, enabled, flt, evidence)  # project wins
     out: list[InstalledPlugin] = []
-    for scope, source, enabled, evidence in result:
+    for scope, source, enabled, flt, evidence in result:
         root = _pi_install_root(source, scope, agent, proj_pi)
         if root is None:
             continue
         pkg_root, fallback = root
-        skills_roots = _pi_skills_roots(pkg_root)
-        if not skills_roots:
+        skills_roots, skill_files = _pi_skill_entries(pkg_root, flt)
+        if not skills_roots and not skill_files:
             continue
         name, version = _pi_pkg_fields(pkg_root, fallback)
         out.append(InstalledPlugin(
@@ -745,6 +924,7 @@ def _pi(home: Path, project_root: Path) -> tuple[list[InstalledPlugin], list[str
             scope=scope,
             project_path=project_root if scope == "project" else None,
             skills_roots=skills_roots,
+            skill_files=skill_files,
             enabled=enabled,
             recursive=True,
             evidence=evidence,

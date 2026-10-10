@@ -220,6 +220,33 @@ def test_discover_pi_package_roots_rank_below_native(tmp_path):
     assert plug.order > max(native_orders)  # pi packages rank BELOW native
 
 
+def test_discover_pi_package_top_level_markdown_skill(tmp_path):
+    # A conventional package skill root may hold bare top-level .md skills
+    # alongside SKILL.md dirs; discovery must register both.
+    h = get("pi")
+    home, proj = tmp_path / "home", tmp_path / "proj"
+    proj.mkdir()
+    agent = home / ".pi" / "agent"
+    agent.mkdir(parents=True)
+    (agent / "settings.json").write_text(
+        json.dumps({"packages": ["git:github.com/obra/sp"]}), encoding="utf-8"
+    )
+    pkg = agent / "git" / "github.com" / "obra" / "sp"
+    skills = pkg / "skills"
+    skills.mkdir(parents=True)
+    (skills / "review.md").write_text(
+        "---\nname: review\ndescription: d\n---\nbody\n", encoding="utf-8"
+    )
+    write_skill(skills, "kept")
+    instances, _broken, unreadable = discover(h, proj, home)
+    assert unreadable == []
+    names = {i.skill_file.name for i in instances}
+    assert names == {"SKILL.md", "review.md"}
+    by_file = {i.skill_file.name: i for i in instances}
+    assert by_file["review.md"].plugin is not None
+    assert by_file["review.md"].plugin.name == "sp"
+
+
 def test_discover_skips_disabled_plugins(tmp_path):
     import json as _json
     from drskill.harnesses import load_harnesses
