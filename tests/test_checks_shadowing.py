@@ -148,6 +148,12 @@ def test_diverged_copies_fires_across_harnesses(tmp_path):
     proj, home = tmp_path / "p", tmp_path / "h"
     _write_named(proj, ".claude/skills", "geo", "new body with extra sections\n" * 3)
     _write_named(proj, ".pi/skills", "geo", "old body\n")
+    # Set explicit distinct mtimes: back-to-back writes can share a stamp on
+    # filesystems with coarse timestamp resolution, which would trip the tie
+    # branch and drop the newest:/older: labels (see jxtj).
+    older, newer = 1750000000, 1750000001
+    os.utime(proj / ".pi/skills/geo/SKILL.md", (older, older))
+    os.utime(proj / ".claude/skills/geo/SKILL.md", (newer, newer))
     findings = run_all(world_from(proj, home, ("claude-code", "pi")), Config())
     hits = find(findings, "diverged-copies")
     assert len(hits) == 1
