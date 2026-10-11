@@ -1,8 +1,13 @@
 name: publish
 
-# Trusted publishing (OIDC) — no long-lived PyPI token. The PyPI trusted
-# publishers for `drskill` and `drskill-core` must name this exact filename:
-#   publish.yml
+# Trusted publishing (OIDC) — no long-lived PyPI token. Two PyPI projects
+# are published from this one workflow file, so each needs a DISTINCT
+# environment; GitHub's OIDC `sub` claim (which includes the environment)
+# is what disambiguates the two projects for PyPI.
+#
+# PyPI trusted publishers must name this exact filename and these environments:
+#   drskill-core -> owner dbreunig, repo drskill, workflow publish.yml, env pypi-core
+#   drskill      -> owner dbreunig, repo drskill, workflow publish.yml, env pypi
 on:
   push:
     tags: ["v*"]
@@ -11,35 +16,43 @@ on:
   workflow_dispatch:
 
 jobs:
-  pypi:
-    name: publish to PyPI
+  core:
+    name: publish drskill-core
     runs-on: ubuntu-latest
     environment:
-      name: pypi
-      url: https://pypi.org/p/drskill
+      name: pypi-core
+      url: https://pypi.org/p/drskill-core
     permissions:
       id-token: write # required: lets the job mint a PyPI OIDC token
       contents: read
     steps:
       - uses: actions/checkout@v4
-
       - name: Install uv
         uses: astral-sh/setup-uv@v5
-
-      # Build the code package (repo root) and the metapackage separately.
       - name: Build drskill-core
         run: uv build --out-dir dist-core
-
-      - name: Build drskill (metapackage)
-        run: uv build packaging/drskill --out-dir dist-drskill
-
-      # Core first, then the metapackage that pins it (matches /release order).
       - name: Publish drskill-core
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist-core
           skip-existing: true
 
+  metapackage:
+    name: publish drskill (metapackage)
+    needs: core # core first — the metapackage pins drskill-core==<version>
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/drskill
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      - name: Build drskill (metapackage)
+        run: uv build packaging/drskill --out-dir dist-drskill
       - name: Publish drskill (metapackage)
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
