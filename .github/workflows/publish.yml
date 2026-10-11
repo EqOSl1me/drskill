@@ -1,0 +1,47 @@
+name: publish
+
+# Trusted publishing (OIDC) — no long-lived PyPI token. The PyPI trusted
+# publishers for `drskill` and `drskill-core` must name this exact filename:
+#   publish.yml
+on:
+  push:
+    tags: ["v*"]
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  pypi:
+    name: publish to PyPI
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/drskill
+    permissions:
+      id-token: write # required: lets the job mint a PyPI OIDC token
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      # Build the code package (repo root) and the metapackage separately.
+      - name: Build drskill-core
+        run: uv build --out-dir dist-core
+
+      - name: Build drskill (metapackage)
+        run: uv build packaging/drskill --out-dir dist-drskill
+
+      # Core first, then the metapackage that pins it (matches /release order).
+      - name: Publish drskill-core
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist-core
+          skip-existing: true
+
+      - name: Publish drskill (metapackage)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist-drskill
+          skip-existing: true
